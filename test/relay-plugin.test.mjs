@@ -1,0 +1,443 @@
+// Tests for what the plugin adds to the relay: plugin mode (no pairing code), starting it from a
+// hook, idle exit, and token numbers read from transcripts.
+//   node --test test/
+// Never touches your real Claude Code configuration: HOME and CLAUDE_CONFIG_DIR point at a temp
+// folder in every child process, and every relay runs on a free port other than 4318.
+import { test, after } from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn, execFileSync } from 'node:child_process';
+import http from 'node:http';
+import net from 'node:net';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+
+const RELAY = path.join(import.meta.dirname, '..', 'plugins', 'agent-constellation', 'relay', 'constellation-relay.mjs');
+const HOOKS = path.join(import.meta.dirname, '..', 'plugins', 'agent-constellation', 'hooks', 'hooks.json');
+const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'constellation-plugin-test-')));
+const CONFIG = path.join(TMP, 'claude-config');
+const ENV = { PATH: process.env.PATH, HOME: TMP, CLAUDE_CONFIG_DIR: CONFIG };
+const PAGE = 'http://localhost:3314';
+const SITE = 'https://diegobianqui.com';
+
+const children = new Set();
+after(() => {
+  for (const c of children) { try { c.kill('SIGKILL'); } catch { /* gone */ } }
+  fs.rmSync(TMP, { recursive: true, force: true });
+});
+
+const freePort = () => new Promise(r => { const s = net.createServer().listen(0, '127.0.0.1', () => { const p = s.address().port; s.close(() => r(p)); }); });
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+function request(port, { method = 'GET', path: p = '/', headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const req = http.request({ host: '127.0.0.1', port, method, path: p, headers: { host: `127.0.0.1:${port}`, ...headers } }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks).toString('utf8') }));
+    });
+    req.on('error', reject);
+    req.end(body);
+  });
+}
+
+// A relay in plugin mode, waiting until it listens.
+async function startPluginRelay(extra = [], env = ENV) {
+  const port = await freePort();
+  const child = spawn(process.execPath, [RELAY, '--plugin', '--port', String(port), '--origin', PAGE, ...extra], { env, stdio: ['ignore', 'pipe', 'pipe'] });
+  children.add(child);
+  let out = '';
+  await new Promise((resolve, reject) => {
+    child.stdout.on('data', d => { out += d; if (out.includes('plugin mode')) resolve(); });
+    child.on('exit', c => reject(new Error(`relay exited ${c}: ${out}`)));
+  });
+  const exited = new Promise(r => child.on('exit', code => r(code)));
+  return { port, child, out, exited, stop: () => child.kill('SIGTERM') };
+}
+
+// The hook forwarder, as Claude Code runs it: one payload on stdin.
+function hook(args, payload, env = ENV) {
+  return new Promise(resolve => {
+    const t0 = Date.now();
+    const p = spawn(process.execPath, [RELAY, 'hook', ...args], { env, stdio: ['pipe', 'pipe', 'pipe'] });
+    let out = '', err = '';
+    p.stdout.on('data', d => { out += d; });
+    p.stderr.on('data', d => { err += d; });
+    p.on('close', code => resolve({ code, out, err, ms: Date.now() - t0 }));
+    p.stdin.end(typeof payload === 'string' ? payload : JSON.stringify(payload));
+  });
+}
+
+// Reads a relay's event stream; .items() parses what arrived so far.
+function openStream(port, origin = PAGE) {
+  return new Promise((resolve, reject) => {
+    let text = '';
+    const req = http.get({ host: '127.0.0.1', port, path: '/events', headers: { host: `127.0.0.1:${port}`, origin } }, res => {
+      if (res.statusCode !== 200) { reject(new Error(`stream ${res.statusCode}`)); return; }
+      res.setEncoding('utf8');
+      res.on('data', d => { text += d; });
+      const wait = setInterval(() => {
+        if (!text.includes('event: ready')) return;
+        clearInterval(wait);
+        resolve({
+          res,
+          text: () => text,
+          items: () => text.split('\n\n').filter(b => b.startsWith('data: ')).map(b => JSON.parse(b.slice(6))),
+          close: () => res.destroy(),
+        });
+      }, 20);
+    });
+    req.on('error', reject);
+  });
+}
+
+function relayPids(port) {
+  const ps = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' });
+  return ps.split('\n').filter(l => l.includes('constellation-relay.mjs --plugin --port ' + port + ' ') || l.endsWith('constellation-relay.mjs --plugin --port ' + port)).map(l => Number(l.trim().split(/\s+/)[0]));
+}
+
+// ------------------------------------------------------------ the plugin's hooks
+
+test('hooks.json: the 16 events, async, through the forwarder; --start where a session begins', () => {
+  const { hooks } = JSON.parse(fs.readFileSync(HOOKS, 'utf8'));
+  const events = ['SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', 'PostToolUseFailure', 'PermissionRequest',
+    'Notification', 'SubagentStart', 'SubagentStop', 'Stop', 'StopFailure', 'PreCompact', 'PostCompact',
+    'TaskCreated', 'TaskCompleted', 'SessionEnd'];
+  assert.deepEqual(Object.keys(hooks).sort(), [...events].sort());
+  for (const e of events) {
+    const [h] = hooks[e][0].hooks;
+    assert.equal(h.type, 'command');
+    assert.equal(h.async, true);
+    assert.ok(h.timeout <= 10);
+    const start = e === 'SessionStart' || e === 'UserPromptSubmit';
+    assert.equal(h.command, `node "\${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" hook${start ? ' --start' : ''}`);
+  }
+});
+
+// ------------------------------------------------------------ no pairing code, exact CORS
+
+test('plugin mode: the lab origins read it without a code; nothing else reads it', async () => {
+  const r = await startPluginRelay();
+  try {
+    assert.doesNotMatch(r.out, /Pairing code/);
+    for (const origin of [PAGE, SITE, 'https://www.diegobianqui.com']) {
+      for (const p of ['/health', '/sessions']) {
+        const ok = await request(r.port, { path: p, headers: { origin } });
+        assert.equal(ok.status, 200, `${origin} ${p}`);
+        assert.equal(ok.headers['access-control-allow-origin'], origin);
+        assert.match(ok.headers.vary, /Origin/);
+      }
+      // A stale code from a manual relay changes nothing.
+      assert.equal((await request(r.port, { path: '/health', headers: { origin, authorization: 'Bearer WRONGCODE' } })).status, 200);
+      const pre = await request(r.port, { method: 'OPTIONS', path: '/events', headers: { origin, 'access-control-request-method': 'GET', 'access-control-request-private-network': 'true' } });
+      assert.equal(pre.status, 204);
+      assert.equal(pre.headers['access-control-allow-origin'], origin);
+      assert.equal(pre.headers['access-control-allow-private-network'], 'true');
+    }
+    const h = JSON.parse((await request(r.port, { path: '/health', headers: { origin: SITE } })).body);
+    assert.equal(h.ok, true);
+    assert.equal(h.mode, 'plugin');
+    assert.equal(h.pairing, false);
+
+    // Other pages, look-alike origins, and requests that don't say where they come from: nothing.
+    for (const origin of ['https://evil.example', 'http://diegobianqui.com', 'https://diegobianqui.com.evil.example', 'https://evil.diegobianqui.com', 'null', 'http://localhost:3311', undefined]) {
+      for (const p of ['/health', '/events', '/sessions']) {
+        const res = await request(r.port, { path: p, headers: origin === undefined ? {} : { origin } });
+        assert.equal(res.status, 403, `${origin} ${p}`);
+        assert.equal(res.headers['access-control-allow-origin'], undefined, `${origin} ${p}`);
+        assert.ok(!res.body.includes('"ok"') && !res.body.includes('event:'), `${origin} ${p} body ${res.body}`);
+      }
+      if (origin !== undefined) {
+        const pre = await request(r.port, { method: 'OPTIONS', path: '/events', headers: { origin, 'access-control-request-method': 'GET' } });
+        assert.equal(pre.headers['access-control-allow-origin'], undefined);
+        assert.equal(pre.headers['access-control-allow-private-network'], undefined);
+      }
+    }
+    // The existing protections hold: no ingest from web pages, Host checked.
+    const body = JSON.stringify({ hook_event_name: 'Stop', session_id: 's1' });
+    assert.equal((await request(r.port, { method: 'POST', path: '/hook', headers: { origin: SITE, 'content-type': 'application/json' }, body })).status, 403);
+    assert.equal((await request(r.port, { method: 'POST', path: '/v1/logs', headers: { origin: SITE, 'content-type': 'application/json' }, body: '{}' })).status, 403);
+    assert.equal((await request(r.port, { path: '/health', headers: { origin: SITE, host: `rebind.attacker.test:${r.port}` } })).status, 421);
+    assert.equal((await request(r.port, { method: 'POST', path: '/hook', headers: { host: 'evil.example', 'content-type': 'application/json' }, body })).status, 421);
+
+    // The stream works for the page, with stripping as before.
+    const s = await openStream(r.port);
+    assert.equal((await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'UserPromptSubmit', session_id: 'sess-cors', prompt: 'PROMPT-SECRET', cwd: '/Users/someone/acme' })).code, 0);
+    await sleep(300);
+    const items = s.items();
+    assert.equal(items.length, 1);
+    assert.equal(items[0].body.hook_event_name, 'UserPromptSubmit');
+    assert.equal(items[0].body.project, 'acme');
+    assert.ok(!s.text().includes('PROMPT-SECRET') && !s.text().includes('/Users/someone'));
+    s.close();
+  } finally { r.stop(); }
+});
+
+test('the manual relay still asks for its pairing code', async () => {
+  const port = await freePort();
+  const child = spawn(process.execPath, [RELAY, '--port', String(port), '--code', 'TESTCODE'], { env: ENV, stdio: ['ignore', 'pipe', 'pipe'] });
+  children.add(child);
+  await new Promise(res => { let out = ''; child.stdout.on('data', d => { out += d; if (out.includes('Pairing code')) res(); }); });
+  try {
+    assert.equal((await request(port, { path: '/health', headers: { origin: SITE } })).status, 401);
+    const ok = await request(port, { path: '/health', headers: { origin: SITE, authorization: 'Bearer TEST-CODE' } });
+    assert.equal(ok.status, 200);
+    assert.equal(JSON.parse(ok.body).pairing, true);
+  } finally { child.kill('SIGTERM'); }
+});
+
+// ------------------------------------------------------------ starting it from the hooks
+
+test('hook --start: one relay for many hooks at once; all events arrive', async () => {
+  const port = await freePort();
+  const env = { ...ENV, CONSTELLATION_RELAY_PORT: String(port), CONSTELLATION_RELAY_ORIGINS: PAGE };
+  const runs = await Promise.all(Array.from({ length: 6 }, (_, i) =>
+    hook(['--start'], { hook_event_name: 'SessionStart', session_id: `sess-start-${i}`, source: 'startup', transcript_path: '/nowhere/x.jsonl' }, env)));
+  for (const r of runs) {
+    assert.deepEqual([r.code, r.out, r.err], [0, '', '']);
+    assert.ok(r.ms < 2600, `took ${r.ms} ms`);
+  }
+  await sleep(800);
+  const pids = relayPids(port);
+  try {
+    assert.equal(pids.length, 1, `relays running: ${pids.length}`);
+    const h = JSON.parse((await request(port, { path: '/health', headers: { origin: PAGE } })).body);
+    assert.equal(h.mode, 'plugin');
+    assert.equal(h.counts.hooks, 6);
+    // A later hook finds it running and starts nothing new.
+    assert.equal((await hook(['--start'], { hook_event_name: 'UserPromptSubmit', session_id: 'sess-start-0' }, env)).code, 0);
+    await sleep(300);
+    assert.deepEqual(relayPids(port), pids);
+  } finally {
+    for (const pid of pids) { try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ } }
+  }
+});
+
+test('hook --start: starts nothing when another program holds the port, and stays silent', async () => {
+  const sockets = [];
+  const other = net.createServer(s => { sockets.push(s); s.end('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n'); }).listen(0, '127.0.0.1');
+  await new Promise(r => other.on('listening', r));
+  const port = other.address().port;
+  const env = { ...ENV, CONSTELLATION_RELAY_PORT: String(port) };
+  const r = await hook(['--start'], { hook_event_name: 'SessionStart', session_id: 'sess-other' }, env);
+  assert.deepEqual([r.code, r.out, r.err], [0, '', '']);
+  await sleep(400);
+  assert.ok(sockets.length >= 1, 'the hook posted to whatever listens');
+  assert.deepEqual(relayPids(port), []);
+  other.close();
+
+  // A relay started in plugin mode on a taken port exits at once, without a word.
+  const taken = net.createServer().listen(0, '127.0.0.1');
+  await new Promise(x => taken.on('listening', x));
+  const res = await new Promise(resolve => {
+    const c = spawn(process.execPath, [RELAY, '--plugin', '--port', String(taken.address().port)], { env: ENV, stdio: ['ignore', 'pipe', 'pipe'] });
+    let out = '';
+    c.stdout.on('data', d => { out += d; });
+    c.stderr.on('data', d => { out += d; });
+    c.on('exit', code => resolve({ code, out }));
+  });
+  assert.deepEqual(res, { code: 0, out: '' });
+  taken.close();
+});
+
+test('plugin mode exits by itself when idle; a connected page keeps it running', async () => {
+  const r = await startPluginRelay(['--idle-seconds', '1.5']);
+  const s = await openStream(r.port);
+  // Twice the idle time with the page open: still running.
+  await sleep(3000);
+  assert.equal(r.child.exitCode, null, 'running while a page is connected');
+  // Hooks also count as use.
+  s.close();
+  for (let i = 0; i < 4; i++) {
+    await sleep(500);
+    await request(r.port, { method: 'POST', path: '/hook', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hook_event_name: 'PreToolUse', session_id: 'idle' }) });
+  }
+  assert.equal(r.child.exitCode, null, 'running while hooks arrive');
+  const t0 = Date.now();
+  const code = await r.exited;
+  assert.equal(code, 0);
+  assert.ok(Date.now() - t0 < 4000, `exited after ${Date.now() - t0} ms`);
+  await assert.rejects(request(r.port, { path: '/health', headers: { origin: PAGE } }));
+});
+
+// ------------------------------------------------------------ token numbers from transcripts
+
+const SECRET = {
+  prompt: 'PROMPT-TEXT-SECRET refund the duplicate charge',
+  reply: 'REPLY-TEXT-SECRET the second charge was a retry',
+  thinking: 'THINKING-SECRET',
+  tool: 'TOOL-INPUT-SECRET rm -rf build',
+  email: 'jane.secret@example.com',
+  path: '/Users/jane/clients/acme-secret',
+};
+const enc = p => p.replace(/[^a-zA-Z0-9]/g, '-');
+
+function transcriptFor(session, project = SECRET.path) {
+  const dir = path.join(CONFIG, 'projects', enc(project));
+  fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `${session}.jsonl`);
+}
+const userLine = (session, text) => JSON.stringify({ type: 'user', sessionId: session, cwd: SECRET.path, message: { role: 'user', content: text }, uuid: 'u-' + Math.random(), timestamp: new Date().toISOString() });
+function assistantLine(session, { id, req, model = 'claude-opus-5-5', usage, content, agentId }) {
+  return JSON.stringify({
+    type: 'assistant', sessionId: session, cwd: SECRET.path, gitBranch: 'main', userType: 'external', ...(agentId ? { agentId, isSidechain: true } : {}),
+    requestId: req, uuid: 'a-' + Math.random(), timestamp: '2026-10-23T10:00:00.000Z',
+    message: { id, type: 'message', role: 'assistant', model, content, stop_reason: 'end_turn', usage: { service_tier: 'standard', ...usage } },
+  });
+}
+const U = (i, o, cr, cw) => ({ input_tokens: i, output_tokens: o, cache_read_input_tokens: cr, cache_creation_input_tokens: cw });
+
+// The api_request records in the stream: [{ session, agent, model, request, in, out, cacheRead, cacheWrite }]
+function usageIn(items) {
+  const out = [];
+  for (const it of items) {
+    if (it.path !== '/v1/logs') continue;
+    for (const rl of it.body.resourceLogs) for (const sl of rl.scopeLogs) for (const lr of sl.logRecords) {
+      const a = Object.fromEntries(lr.attributes.map(kv => [kv.key, kv.value.stringValue ?? Number(kv.value.intValue)]));
+      out.push({ session: a['session.id'], agent: a.agent_id, model: a.model, request: a.request_id, in: a.input_tokens, out: a.output_tokens, cacheRead: a.cache_read_tokens, cacheWrite: a.cache_creation_tokens, event: a['event.name'], body: lr.body.stringValue });
+    }
+  }
+  return out;
+}
+
+test('transcripts: only the numbers come out, read incrementally, partial lines waited for', async () => {
+  const r = await startPluginRelay();
+  const s = await openStream(r.port);
+  const session = 'aaaa1111-2222-3333-4444-555566667777';
+  const file = transcriptFor(session);
+  const send = (event, extra = {}) => hook([`http://127.0.0.1:${r.port}/hook`], {
+    hook_event_name: event, session_id: session, transcript_path: file, cwd: SECRET.path, last_assistant_message: SECRET.reply, prompt: SECRET.prompt, ...extra,
+  });
+  try {
+    // A turn: prompt, a reply in two content blocks (the same message twice, as Claude Code writes
+    // it), a tool call, a synthetic message and a message without usage.
+    fs.writeFileSync(file, [
+      JSON.stringify({ type: 'summary', summary: SECRET.prompt }),
+      userLine(session, `${SECRET.prompt} ${SECRET.email}`),
+      assistantLine(session, { id: 'msg_A', req: 'req_A', usage: U(10, 200, 3000, 400), content: [{ type: 'thinking', thinking: SECRET.thinking }] }),
+      assistantLine(session, { id: 'msg_A', req: 'req_A', usage: U(10, 200, 3000, 400), content: [{ type: 'tool_use', name: 'Bash', input: { command: SECRET.tool } }] }),
+      userLine(session, [{ type: 'tool_result', content: `${SECRET.path}/notes.md ${SECRET.email}` }]),
+      assistantLine(session, { id: 'msg_B', req: 'req_B', model: 'claude-haiku-4-5', usage: U(5, 60, 3400, 0), content: [{ type: 'text', text: SECRET.reply }] }),
+      assistantLine(session, { id: 'msg_S', req: 'req_S', model: '<synthetic>', usage: U(0, 0, 0, 0), content: [{ type: 'text', text: 'API Error' }] }),
+      JSON.stringify({ type: 'assistant', message: { id: 'msg_N', role: 'assistant', model: 'claude-opus-5-5', content: [{ type: 'text', text: SECRET.reply }] } }),
+      '{"type":"assistant","message":{"usage": not json',
+      '',
+    ].join('\n'));
+    assert.equal((await send('Stop')).code, 0);
+    await sleep(700);
+    let usage = usageIn(s.items());
+    assert.deepEqual(usage.map(u => [u.request, u.model, u.in, u.out, u.cacheRead, u.cacheWrite]), [
+      ['req_A', 'claude-opus-5-5', 10, 200, 3000, 400],
+      ['req_B', 'claude-haiku-4-5', 5, 60, 3400, 0],
+    ]);
+    assert.ok(usage.every(u => u.session === session && u.event === 'api_request' && u.body === 'claude_code.api_request' && u.agent === undefined));
+
+    // The late read after Stop finds nothing new: nothing counted twice.
+    await sleep(2800);
+    assert.equal(usageIn(s.items()).length, 2);
+
+    // Incremental: a new call, and a line still being written.
+    const next = assistantLine(session, { id: 'msg_C', req: 'req_C', usage: U(7, 70, 3500, 10), content: [{ type: 'text', text: SECRET.reply }] });
+    const half = assistantLine(session, { id: 'msg_D', req: 'req_D', usage: U(8, 80, 3600, 20), content: [{ type: 'text', text: SECRET.reply }] });
+    fs.appendFileSync(file, `${userLine(session, SECRET.prompt)}\n${next}\n${half.slice(0, 120)}`);
+    assert.equal((await send('PostToolUse', { tool_name: 'Bash', tool_input: { command: SECRET.tool } })).code, 0);
+    await sleep(600);
+    usage = usageIn(s.items());
+    assert.deepEqual(usage.map(u => u.request), ['req_A', 'req_B', 'req_C'], 'only the new complete line');
+    // The rest of the line arrives; the same message is written again (another content block).
+    fs.appendFileSync(file, `${half.slice(120)}\n${half}\n`);
+    assert.equal((await send('PostToolUse', { tool_name: 'Read' })).code, 0);
+    await sleep(600);
+    usage = usageIn(s.items());
+    assert.deepEqual(usage.map(u => [u.request, u.in, u.out, u.cacheRead, u.cacheWrite]).slice(2), [['req_C', 7, 70, 3500, 10], ['req_D', 8, 80, 3600, 20]]);
+
+    // A line too long to be a model call's (a pasted image) is skipped, and the next one counted.
+    fs.appendFileSync(file, `${userLine(session, 'x'.repeat(5 << 20))}\n${assistantLine(session, { id: 'msg_E', req: 'req_E', usage: U(1, 2, 3, 4), content: [] })}\n`);
+    assert.equal((await send('UserPromptSubmit')).code, 0);
+    await sleep(900);
+    assert.deepEqual(usageIn(s.items()).map(u => u.request).slice(4), ['req_E']);
+
+    // Nothing of the text, the paths or the identity anywhere in the stream.
+    const text = s.text();
+    for (const m of [...Object.values(SECRET), 'refund', 'notes.md', '.jsonl', enc(SECRET.path), CONFIG, TMP, 'transcript_path', 'last_assistant_message', '"prompt"', 'API Error', 'msg_N', '<synthetic>', 'gitBranch', 'thinking', 'tool_use']) {
+      assert.ok(!text.includes(m), `stream contains ${m}`);
+    }
+    const h = JSON.parse((await request(r.port, { path: '/health', headers: { origin: PAGE } })).body);
+    assert.equal(h.counts.transcripts, 5);
+  } finally { s.close(); r.stop(); }
+});
+
+test('transcripts: a subagent\'s own transcript, attributed to it', async () => {
+  const r = await startPluginRelay();
+  const s = await openStream(r.port);
+  const session = 'bbbb1111-2222-3333-4444-555566667777';
+  const agent = 'a1b2c3d4e5';
+  const main = transcriptFor(session);
+  fs.writeFileSync(main, assistantLine(session, { id: 'msg_M', req: 'req_M', usage: U(1, 1, 1, 1), content: [] }) + '\n');
+  const subDir = path.join(path.dirname(main), session, 'subagents');
+  fs.mkdirSync(subDir, { recursive: true });
+  const sub = path.join(subDir, `agent-${agent}.jsonl`);
+  fs.writeFileSync(sub, [
+    userLine(session, SECRET.prompt),
+    assistantLine(session, { id: 'msg_S1', req: 'req_S1', usage: U(20, 300, 0, 9000), content: [{ type: 'text', text: SECRET.reply }], agentId: agent }),
+    '',
+  ].join('\n'));
+  try {
+    // A hook inside the subagent (agent_id, the session's transcript_path): both files are read.
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'PostToolUse', session_id: session, agent_id: agent, agent_type: 'Explore', tool_name: 'Read', transcript_path: main });
+    await sleep(600);
+    let usage = usageIn(s.items());
+    assert.deepEqual(usage.map(u => [u.request, u.agent]).sort(), [['req_M', undefined], ['req_S1', agent]]);
+    // SubagentStop names it directly; nothing new, nothing twice.
+    fs.appendFileSync(sub, assistantLine(session, { id: 'msg_S2', req: 'req_S2', usage: U(2, 30, 9000, 0), content: [], agentId: agent }) + '\n');
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'SubagentStop', session_id: session, agent_id: agent, agent_type: 'Explore', transcript_path: main, agent_transcript_path: sub });
+    await sleep(600);
+    usage = usageIn(s.items());
+    assert.deepEqual(usage.filter(u => u.agent === agent).map(u => u.request), ['req_S1', 'req_S2']);
+    assert.ok(!s.text().includes('subagents') && !s.text().includes(SECRET.reply));
+  } finally { s.close(); r.stop(); }
+});
+
+test('transcripts: only Claude Code transcripts named by the hook are read', async () => {
+  const r = await startPluginRelay();
+  const s = await openStream(r.port);
+  const session = 'cccc1111-2222-3333-4444-555566667777';
+  const line = assistantLine(session, { id: 'msg_X', req: 'req_X', usage: U(1, 2, 3, 4), content: [] }) + '\n';
+  // Not under a "projects" folder; under one but named after another session; a symbolic link.
+  const outside = path.join(TMP, 'elsewhere', `${session}.jsonl`);
+  fs.mkdirSync(path.dirname(outside), { recursive: true });
+  fs.writeFileSync(outside, line);
+  const wrongName = path.join(path.dirname(transcriptFor(session)), 'other-session.jsonl');
+  fs.writeFileSync(wrongName, line);
+  const linkDir = path.join(CONFIG, 'projects', 'linked');
+  fs.mkdirSync(linkDir, { recursive: true });
+  const link = path.join(linkDir, `${session}.jsonl`);
+  fs.symlinkSync(outside, link);
+  try {
+    for (const transcript_path of [outside, wrongName, link, 'relative/projects/x.jsonl', `${CONFIG}/projects/../../elsewhere/${session}.jsonl`]) {
+      await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'Stop', session_id: session, transcript_path });
+    }
+    // A hook posted straight to the relay (not through the forwarder) is held to the same rules.
+    await request(r.port, { method: 'POST', path: '/hook', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ hook_event_name: 'Stop', session_id: 'x', transcript_path: '/etc/passwd' }) });
+    await sleep(700);
+    assert.deepEqual(usageIn(s.items()), []);
+    assert.equal(s.items().filter(i => i.path === '/hook').length, 6);
+  } finally { s.close(); r.stop(); }
+});
+
+test('transcripts: with telemetry on, its own events are the source (no double count)', async () => {
+  const r = await startPluginRelay();
+  const s = await openStream(r.port);
+  const session = 'dddd1111-2222-3333-4444-555566667777';
+  const file = transcriptFor(session);
+  fs.writeFileSync(file, assistantLine(session, { id: 'msg_T', req: 'req_T', usage: U(1, 2, 3, 4), content: [] }) + '\n');
+  try {
+    const otlp = { resourceLogs: [{ resource: { attributes: [] }, scopeLogs: [{ scope: { name: 'com.anthropic.claude_code.events' }, logRecords: [{ timeUnixNano: '1', body: { stringValue: 'claude_code.api_request' }, attributes: [{ key: 'event.name', value: { stringValue: 'api_request' } }, { key: 'session.id', value: { stringValue: session } }, { key: 'request_id', value: { stringValue: 'req_T' } }, { key: 'input_tokens', value: { intValue: '1' } }] }] }] }] };
+    assert.equal((await request(r.port, { method: 'POST', path: '/v1/logs', headers: { 'content-type': 'application/json' }, body: JSON.stringify(otlp) })).status, 200);
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'Stop', session_id: session, transcript_path: file });
+    await sleep(700);
+    const usage = usageIn(s.items());
+    assert.equal(usage.length, 1, 'only the telemetry event');
+    assert.equal(usage[0].model, undefined);
+  } finally { s.close(); r.stop(); }
+});

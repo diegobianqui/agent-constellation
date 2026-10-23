@@ -1,0 +1,14 @@
+{
+  "name": "agent-constellation-plugin",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Claude Code plugin marketplace for the agent constellation lab",
+  "license": "MIT",
+  "type": "module",
+  "engines": { "node": ">=18" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "sync-relay": "node scripts/sync-relay.mjs",
+    "check-relay": "node scripts/sync-relay.mjs --check"
+  }
+}

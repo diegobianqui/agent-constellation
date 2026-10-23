@@ -1,0 +1,13 @@
+{
+  "name": "agent-constellation",
+  "version": "1.0.0",
+  "description": "Connects your local Claude Code sessions to the agent constellation lab at diegobianqui.com/lab/constellation: background hooks and a relay on 127.0.0.1 that pass on the shape of the activity (agents, tools, timings, token counts), never prompts, replies, commands or paths.",
+  "author": {
+    "name": "Diego Bianqui",
+    "url": "https://diegobianqui.com"
+  },
+  "homepage": "https://diegobianqui.com/lab/constellation",
+  "repository": "https://github.com/diegobianqui/agent-constellation",
+  "license": "MIT",
+  "keywords": ["observability", "hooks", "visualization", "agents", "privacy"]
+}
