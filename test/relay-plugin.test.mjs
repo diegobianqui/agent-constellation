@@ -16,7 +16,10 @@ const RELAY = path.join(import.meta.dirname, '..', 'plugins', 'agent-constellati
 const HOOKS = path.join(import.meta.dirname, '..', 'plugins', 'agent-constellation', 'hooks', 'hooks.json');
 const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'constellation-plugin-test-')));
 const CONFIG = path.join(TMP, 'claude-config');
-const ENV = { PATH: process.env.PATH, HOME: TMP, CLAUDE_CONFIG_DIR: CONFIG };
+// CONSTELLATION_RELAY_PORT: a port nothing listens on, so a command that defaults to the relay's
+// port never reaches a real relay on 4318.
+const DEAD_PORT = 4397;
+const ENV = { PATH: process.env.PATH, HOME: TMP, CLAUDE_CONFIG_DIR: CONFIG, CONSTELLATION_RELAY_PORT: String(DEAD_PORT) };
 const PAGE = 'http://localhost:3314';
 const SITE = 'https://diegobianqui.com';
 
@@ -110,7 +113,7 @@ test('hooks.json: the 16 events, async, through the forwarder; --start where a s
     assert.equal(h.async, true);
     assert.ok(h.timeout <= 10);
     const start = e === 'SessionStart' || e === 'UserPromptSubmit';
-    assert.equal(h.command, `node "\${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" hook${start ? ' --start' : ''}`);
+    assert.equal(h.command, `node "\${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" hook${start ? ' --start' : ''} --via plugin`);
   }
 });
 

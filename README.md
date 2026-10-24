@@ -10,19 +10,51 @@ own browser. Never prompts, replies, commands, file paths, tool inputs or output
 
 ## Install
 
-In a Claude Code session:
+**Claude Code in a terminal.** In a session:
 
 ```
 /plugin marketplace add diegobianqui/agent-constellation
 /plugin install agent-constellation@agent-constellation
+/reload-plugins
 ```
 
-Confirm the install in the panel that opens. Then start or continue a Claude Code session on this
-computer, open https://diegobianqui.com/lab/constellation and press **Connect Claude Code**.
-No download, no settings to edit, no pairing code.
+Choose a scope in the panel that opens (for you, on every project: "Install for you"). If the
+install summary already says the plugin is active, `/reload-plugins` changes nothing.
 
-From a terminal, the same: `claude plugin marketplace add diegobianqui/agent-constellation`, then
-`claude plugin install agent-constellation@agent-constellation`.
+**Desktop app.** Its plugin browser lists plugins only from marketplaces you already added, so
+add this one from a terminal, once:
+
+```
+claude plugin marketplace add diegobianqui/agent-constellation
+claude plugin install agent-constellation@agent-constellation
+```
+
+With Claude Code 2.1.292 or later, one command does both:
+`claude plugin install agent-constellation --marketplace diegobianqui/agent-constellation`.
+The terminal, the desktop app's local sessions and the VS Code extension read the same settings,
+so the plugin then appears on the desktop app's Plugins page and is on in the local sessions you
+start next.
+
+**VS Code.** Type `/plugins` in the Claude Code panel to open **Manage plugins**. On the
+**Marketplaces** tab, add `diegobianqui/agent-constellation`; on the **Plugins** tab, click
+**Install** on agent-constellation and choose **Install for you**. Or open this link, which asks
+before it adds anything:
+
+```
+vscode://anthropic.claude-code/install-plugin?plugin=agent-constellation&marketplace=diegobianqui/agent-constellation
+```
+
+Then, in a Claude Code session on this computer, run:
+
+```
+/agent-constellation:open
+```
+
+It starts the plugin's relay if none is running and opens
+https://diegobianqui.com/lab/constellation?connect=claude-code in your default browser (`open` on
+macOS, `xdg-open` on Linux, `start` on Windows); the page connects by itself. Or open the lab
+yourself, after a session started or sent a prompt, and press **Connect Claude Code**. No
+download, no settings to edit, no pairing code.
 
 Needs Node.js 18 or later, as `node` on the PATH that Claude Code runs hooks with.
 
@@ -40,6 +72,11 @@ serves every session on the computer. It stops by itself after 30 minutes with n
 no page connected; the next session or prompt starts it again. If another program holds port
 4318 (for example a relay you started by hand), the plugin starts nothing and posts its events to
 that program.
+
+It also adds three commands, which run only when you type them (Claude never runs them on its
+own): `/agent-constellation:open` (above), `/agent-constellation:telemetry` (on, off, or alone to
+see what is set) and `/agent-constellation:remove-manual-hooks` (below). Nothing opens a browser
+from a hook or on install: only `/agent-constellation:open` does, when you run it.
 
 The relay is one file with no dependencies, `plugins/agent-constellation/relay/constellation-relay.mjs`.
 Read it before you install: the comment at the top says exactly what it does.
@@ -92,31 +129,77 @@ plugin then posts to it and starts nothing.
 
 ## Advanced: telemetry (model calls, costs)
 
-Claude Code's OpenTelemetry adds each model call's duration and estimated cost, and traces. Download
-the relay and turn it on:
+Claude Code's OpenTelemetry adds each model call's duration and estimated cost, and traces. With the
+plugin installed, type in a Claude Code session:
+
+```
+/agent-constellation:telemetry on
+```
+
+It runs the bundled relay's `setup --no-hooks`, which adds the telemetry settings to your Claude
+Code settings (`~/.claude/settings.json`, a backup is saved first) and adds no hooks, since the
+plugin sends the hook events. It shows what changed; start a new session for it to apply.
+`/agent-constellation:telemetry off` takes out exactly what `on` added and puts back any value it
+replaced; `/agent-constellation:telemetry` alone shows what is set. Neither touches any hook.
+Claude never runs these commands on its own (`disable-model-invocation`): only when you type them.
+
+When telemetry arrives, its own events are the source of token counts and the transcripts are not
+counted again.
+
+Without the plugin, use the relay by hand, with a pairing code:
 
 ```
 curl -fO https://diegobianqui.com/relay/constellation-relay.mjs
-node constellation-relay.mjs setup --no-hooks
+node constellation-relay.mjs setup      # telemetry and hooks; a backup is saved first
+node constellation-relay.mjs            # prints the pairing code to paste in the lab
 ```
 
-`setup` edits `~/.claude/settings.json` (a backup is saved first); `--no-hooks` because the plugin
-already sends the hook events. Telemetry then goes to the plugin's relay on port 4318. When
-telemetry arrives, its own events are the source of token counts and the transcripts are not
-counted again. `node constellation-relay.mjs setup --remove` undoes exactly what setup added.
+`node constellation-relay.mjs setup --remove` undoes exactly what setup added (`--no-hooks`: only
+the telemetry; `--no-telemetry`: only the hooks). Running setup again with nothing to change
+changes nothing and saves no backup. `node constellation-relay.mjs status` shows what is set and
+what answers on port 4318.
 
-Without the plugin, run `setup` without `--no-hooks`, start the relay with
-`node constellation-relay.mjs` and paste the pairing code it prints in the lab.
+### Hooks installed twice
+
+If you ran `setup` without `--no-hooks` before installing the plugin, each event is sent twice:
+by the hooks in your settings and by the plugin's. Each copy says which hooks sent it, and the
+relay passes on one copy of each pair (same event, session, tool use, agent and task, within
+5 seconds) and drops the other, so nothing is counted twice. Copies from one kind of hooks are
+never dropped. The lab page then says so, once; remove the manual hooks with:
+
+```
+/agent-constellation:remove-manual-hooks
+```
+
+It takes out the hooks `setup` added and leaves the telemetry settings and your other hooks as
+they are.
+
+### A relay started by hand holds port 4318
+
+The plugin starts nothing when another program listens on 4318: its hooks post to that program.
+A relay you started by hand (or an older one) asks for its pairing code, and the lab says which
+one it found. Paste its code, or stop it so the plugin can start its own:
+
+```
+lsof -nP -iTCP:4318 -sTCP:LISTEN
+kill <PID>
+```
 
 ## Remove
 
+If you turned telemetry on, turn it off first (otherwise Claude Code keeps sending it to a port
+where nothing listens):
+
 ```
+/agent-constellation:telemetry off
 /plugin uninstall agent-constellation
 /plugin marketplace remove agent-constellation
 ```
 
 A running relay stops by itself within 30 minutes, or stop it now: it is the `node` process running
-`constellation-relay.mjs --plugin`. The plugin writes nothing to disk.
+`constellation-relay.mjs --plugin`. The plugin writes nothing to disk, except the settings that
+`/agent-constellation:telemetry on` and `/agent-constellation:remove-manual-hooks` change when you
+run them (each saves a backup first).
 
 ## The relay's source
 
@@ -137,9 +220,9 @@ Pass a path instead of the default URL to sync from a local checkout of the site
 npm test
 ```
 
-Runs the relay on free ports other than 4318, with `HOME` and `CLAUDE_CONFIG_DIR` in a temp folder.
-`claude plugin validate .` and `claude plugin validate plugins/agent-constellation` check the
-manifests.
+Runs the relay on free ports other than 4318, with `HOME` and `CLAUDE_CONFIG_DIR` in a temp folder,
+and setup on temp settings files only. `claude plugin validate --strict .` and
+`claude plugin validate --strict plugins/agent-constellation` check the manifests.
 
 ## License
 

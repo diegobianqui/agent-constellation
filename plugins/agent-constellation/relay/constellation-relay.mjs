@@ -40,17 +40,28 @@
  * Commands
  *   node constellation-relay.mjs                start the relay (prints a pairing code)
  *   node constellation-relay.mjs --no-names     the same, without project folder names and session titles
- *   node constellation-relay.mjs setup          point Claude Code at the relay (settings.json)
- *   node constellation-relay.mjs setup --remove undo exactly what setup added
+ *   node constellation-relay.mjs setup          point Claude Code at the relay (settings.json): telemetry and hooks
+ *   node constellation-relay.mjs setup --no-hooks
+ *                                               telemetry only (with the plugin, which sends the hook events)
+ *   node constellation-relay.mjs setup --remove undo exactly what setup added (--no-hooks: telemetry
+ *                                               only; --no-telemetry: hooks only)
+ *   node constellation-relay.mjs status         what setup set, and what answers on the relay's port
  *   node constellation-relay.mjs hook <url>     used by the hooks that setup adds, not by you
  *   node constellation-relay.mjs hook --start   used by the plugin's hooks: also starts the relay
  *                                               in plugin mode if nothing listens on its port
  *   node constellation-relay.mjs --help
  *
+ * Hooks installed twice (the plugin's and the ones setup added): each copy says where it comes
+ * from (--via plugin or --via settings; hooks from an older setup say nothing and count as
+ * settings). When both kinds send the same event for the same session within a few seconds, the
+ * relay passes on one copy and drops the other, and /health tells the page so it can say how to
+ * remove the manual ones.
+ *
  * Endpoints (all on http://127.0.0.1:<port>)
  *   POST /v1/traces /v1/logs /v1/metrics   from Claude Code: OTLP/HTTP, JSON (gzip or deflate)
  *   POST /hook                             from the hook forwarder: one hook payload
- *   GET  /health                           to the page: { ok, version, counts, lastSeen }
+ *   GET  /health                           to the page: { ok, version, mode, counts, lastSeen,
+ *                                          duplicateHooks }
  *   GET  /events                           to the page: Server-Sent Events, one stripped
  *                                          payload per message, as { path, body, ts }
  *   GET  /sessions                         to the page: the Claude Code sessions on this computer
@@ -70,7 +81,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '1.2.0';
+const VERSION = '1.3.0';
 const SELF = fileURLToPath(import.meta.url);
 const DEFAULT_PORT = 4318;
 // For tests only: the plugin's hooks use this port, and pass these extra page origins to the
@@ -90,6 +101,11 @@ const SCAN_WINDOW_MS = 24 * 3600 * 1000; // /sessions: transcripts changed in th
 const SCAN_ACTIVE_MS = 2 * 60 * 1000;    // ...and "active now": changed in the last 2 minutes
 const SCAN_MAX = 50;
 const IDLE_MS = 30 * 60 * 1000;          // plugin mode: exit after this long with no hooks and no page
+// Hooks installed twice: two copies of one event (same event, session, tool use, agent and task)
+// from the two kinds of hooks, stamped within DUP_MS of each other, are one event. /health says
+// so for TWICE_MS after the last such pair.
+const DUP_MS = 5000;
+const TWICE_MS = 10 * 60 * 1000;
 
 // ---------------------------------------------------------------- command line
 
@@ -106,7 +122,8 @@ function opts(name) {
   return out;
 }
 function portArg() {
-  const raw = opt('--port') ?? String(DEFAULT_PORT);
+  // CONSTELLATION_RELAY_PORT: for tests only, as for the plugin's hooks.
+  const raw = opt('--port') ?? (process.env[ENV_PORT] || String(DEFAULT_PORT));
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1 || n > 65535) fail(`--port must be a number from 1 to 65535 (got ${raw}).`);
   return n;
@@ -134,15 +151,23 @@ https://diegobianqui.com/lab/constellation. Runs on this computer only.
       --print           show what would change, change nothing
       --remove          take out exactly what setup added
       --force           replace an OpenTelemetry endpoint that points somewhere else
-      --no-hooks        telemetry only
-      --no-telemetry    hooks only
+      --no-hooks        telemetry only: hooks in the file are left as they are
+                        (with --remove: take out the telemetry settings only)
+      --no-telemetry    hooks only: telemetry settings are left as they are
+                        (with --remove: take out the hooks only)
       --settings <file> edit another settings file
+      Running it again with nothing to change changes nothing and saves no backup.
 
-  node constellation-relay.mjs hook <url>
+  node constellation-relay.mjs status [--port 4318] [--settings <file>]
+      What setup set in the settings file (telemetry, hooks) and what answers on the relay's port.
+
+  node constellation-relay.mjs hook [--via plugin|settings] <url>
       The background hook that setup installs: reads one hook payload on stdin, strips it and
       posts it to the relay. Silent, at most about 2 seconds, always exits 0.
       --start   if nothing listens on the relay's port, start the relay in plugin mode first
                 (used by the agent-constellation Claude Code plugin)
+      --via     which hooks run it: the plugin's or the ones setup added to settings.json.
+                The relay uses it to drop the second copy when both are installed.
 
   node constellation-relay.mjs --plugin [--port 4318] [--origin <url>] [--no-names]
       The relay as the plugin starts it: no pairing code (only the lab's own origin may read
@@ -681,8 +706,10 @@ function startRelay() {
 
   const buffer = [];
   const viewers = new Set();
-  const counts = { traces: 0, logs: 0, metrics: 0, hooks: 0, transcripts: 0 };
+  const counts = { traces: 0, logs: 0, metrics: 0, hooks: 0, transcripts: 0, duplicates: 0 };
   const lastSeen = { otel: 0, hooks: 0, transcripts: 0 };
+  const viaSeen = { plugin: 0, settings: 0 }; // when each kind of hook last sent an event
+  let twiceAt = 0;                            // when the last pair of copies arrived
   let lastActivity = Date.now();
   let warnedProtobuf = false;
   let firstEvent = true;
@@ -787,11 +814,10 @@ function startRelay() {
     // over loopback); this pass drops them when the relay runs with --no-names.
     const body = stripHook(payload, { names: NAMES });
     if (!body) return;
-    counts.hooks++;
-    lastSeen.hooks = Date.now();
     lastActivity = Date.now();
     // The forwarder passes the transcript paths along to this relay only; they are read here
-    // and never published (stripHook dropped them from body).
+    // and never published (stripHook dropped them from body). Reading a transcript twice counts
+    // nothing twice (a byte offset per file), so a dropped copy may trigger it too.
     for (const t of transcriptTargets(payload)) {
       transcripts.trigger(t);
       if (LATE_READ.has(body.hook_event_name)) setTimeout(() => transcripts.trigger(t), 2500).unref();
@@ -799,7 +825,49 @@ function startRelay() {
     // The forwarder stamps when the hook ran, so events keep their order after a slow post.
     const stamped = Number(req.headers['x-hook-ts']);
     const ts = Math.abs(stamped - Date.now()) < 600000 ? stamped : Date.now();
+    const via = payload.via === 'plugin' ? 'plugin' : 'settings';
+    viaSeen[via] = Date.now();
+    if (twin(body, via, ts)) {
+      counts.duplicates++;
+      return;
+    }
+    counts.hooks++;
+    lastSeen.hooks = Date.now();
     publish({ path: '/hook', body, ts });
+  }
+
+  // Hooks installed twice: the plugin's hooks and the ones setup added both run for every event,
+  // so each event arrives twice, once of each kind. The second copy of a pair (same event,
+  // session, tool use, agent and task, the other kind, stamped within DUP_MS) is dropped. Copies
+  // of one kind are never dropped: with only one kind installed, every event passes.
+  const unmatched = new Map(); // key -> { plugin: [ts], settings: [ts] }, copies still waiting for their twin
+  let sweptAt = 0;
+  function twin(body, via, ts) {
+    const now = Date.now();
+    if (now - sweptAt > 1000) {
+      sweptAt = now;
+      for (const [k, v] of unmatched) {
+        v.plugin = v.plugin.filter(t => now - t < 2 * DUP_MS);
+        v.settings = v.settings.filter(t => now - t < 2 * DUP_MS);
+        if (!v.plugin.length && !v.settings.length) unmatched.delete(k);
+      }
+    }
+    const key = [body.hook_event_name, body.session_id, body.tool_use_id, body.agent_id, body.task_id].map(v => v || '').join('|');
+    let entry = unmatched.get(key);
+    if (!entry) {
+      if (unmatched.size >= 5000) unmatched.delete(unmatched.keys().next().value);
+      entry = { plugin: [], settings: [] };
+      unmatched.set(key, entry);
+    }
+    const other = entry[via === 'plugin' ? 'settings' : 'plugin'];
+    const i = other.findIndex(t => Math.abs(t - ts) <= DUP_MS);
+    if (i >= 0) {
+      other.splice(i, 1);
+      twiceAt = now;
+      return true;
+    }
+    entry[via].push(ts);
+    return false;
   }
 
   function openStream(req, res) {
@@ -870,9 +938,18 @@ function startRelay() {
         }
         if (req.method !== 'GET') return send(res, 405, { error: 'GET only' }, { Allow: 'GET, OPTIONS', ...cors(req) });
         if (PLUGIN && !authorized(req)) return send(res, 403, { error: 'Only the lab page can read this relay' }, { Vary: 'Origin' });
-        if (!authorized(req)) return send(res, 401, { error: 'Wrong pairing code' }, { 'WWW-Authenticate': 'Bearer', ...cors(req) });
+        // The version and mode are no secret: they let the page say what is running here.
+        if (!authorized(req)) return send(res, 401, { error: 'Wrong pairing code', version: VERSION, mode: 'manual', pairing: true }, { 'WWW-Authenticate': 'Bearer', ...cors(req) });
         if (route === '/health') {
-          return send(res, 200, { ok: true, version: VERSION, mode: PLUGIN ? 'plugin' : 'manual', pairing: !PLUGIN, names: NAMES, counts: { ...counts, viewers: viewers.size, buffered: buffer.length }, lastSeen: { ...lastSeen } }, cors(req));
+          const now = Date.now();
+          return send(res, 200, {
+            ok: true, version: VERSION, mode: PLUGIN ? 'plugin' : 'manual', pairing: !PLUGIN, names: NAMES,
+            counts: { ...counts, viewers: viewers.size, buffered: buffer.length }, lastSeen: { ...lastSeen },
+            hooksVia: { ...viaSeen },
+            // Both the plugin's hooks and the ones setup added are sending: the page says how to
+            // remove the manual ones.
+            duplicateHooks: twiceAt > 0 && now - twiceAt < TWICE_MS,
+          }, cors(req));
         }
         if (route === '/sessions') return send(res, 200, await scanSessions({ names: NAMES }), cors(req));
         return openStream(req, res);
@@ -892,7 +969,8 @@ function startRelay() {
     // Plugin mode: another relay (or anything else) already holds the port. Leave it be.
     if (PLUGIN) process.exit(0);
     if (err.code === 'EADDRINUSE') {
-      fail(`Port ${PORT} is already in use (another relay or OpenTelemetry collector?).\n` +
+      fail(`Port ${PORT} is already in use (the agent-constellation plugin's relay, another relay or an OpenTelemetry collector?).\n` +
+        `See what holds it:  lsof -nP -iTCP:${PORT} -sTCP:LISTEN   (node constellation-relay.mjs status tells relays apart)\n` +
         `Stop it, or use another port for both:  node constellation-relay.mjs --port <n>\n` +
         `                                         node constellation-relay.mjs setup --port <n>`);
     }
@@ -954,150 +1032,320 @@ const HOOK_EVENTS = [
 ];
 // Setup records what it added under this env key, so --remove takes out exactly that and puts
 // back any value it replaced. (An env entry is harmless: it only reaches Claude Code's process.)
+// The record has a part for telemetry and one for hooks, so each can be added and removed on its
+// own: --no-hooks leaves the hooks as they are, --no-telemetry the telemetry.
 const MARK = 'CONSTELLATION_RELAY_SETUP';
 const OURS = /constellation-relay\.mjs"? hook /;
+const isMap = v => !!v && typeof v === 'object' && !Array.isArray(v);
+const isOurs = h => !!h && h.type === 'command' && typeof h.command === 'string' && OURS.test(h.command);
+// The commands of the agent-constellation plugin that run setup for you (setup --plugin).
+const PLUGIN_TELEMETRY_OFF = '/agent-constellation:telemetry off';
+const PLUGIN_REMOVE_HOOKS = '/agent-constellation:remove-manual-hooks';
 
-function setup() {
-  const PORT = portArg();
-  const BASE = `http://127.0.0.1:${PORT}`;
-  const configDir = process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
-  const SETTINGS = path.resolve(opt('--settings') || path.join(configDir, 'settings.json'));
-  const PRINT = flag('--print');
+function settingsPath() {
+  return path.resolve(opt('--settings') || path.join(claudeConfigDir(), 'settings.json'));
+}
 
-  const ENV = {
+function readSettings(file) {
+  const raw = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : '';
+  let settings = {};
+  if (raw.trim()) {
+    try { settings = JSON.parse(raw); } catch (err) { fail(`Could not parse ${file}: ${err.message}\nFix the JSON and run setup again. Nothing was changed.`); }
+  }
+  if (!isMap(settings)) fail(`${file} is not a JSON object. Nothing was changed.`);
+  if (settings.env !== undefined && !isMap(settings.env)) fail(`"env" in ${file} is not an object. Nothing was changed.`);
+  if (settings.hooks !== undefined && !isMap(settings.hooks)) fail(`"hooks" in ${file} is not an object. Nothing was changed.`);
+  return settings;
+}
+
+/** The hooks setup added (any version, any port, wherever the relay file was). */
+function countOurs(settings) {
+  let n = 0;
+  if (!isMap(settings.hooks)) return 0;
+  for (const groups of Object.values(settings.hooks)) {
+    if (!Array.isArray(groups)) continue;
+    for (const g of groups) if (g && Array.isArray(g.hooks)) n += g.hooks.filter(isOurs).length;
+  }
+  return n;
+}
+
+/** What setup recorded, in the current shape. A record from relay 1.2 or earlier (one part) is converted. */
+function readMark(settings) {
+  const env = isMap(settings.env) ? settings.env : null;
+  if (!env || typeof env[MARK] !== 'string') return null;
+  let m;
+  try { m = JSON.parse(env[MARK]); } catch { return null; }
+  if (!isMap(m)) return null;
+  const map = v => (isMap(v) ? { ...v } : {});
+  const events = v => (Array.isArray(v) ? v.filter(e => typeof e === 'string') : []);
+  if (m.v === 2) {
+    return {
+      v: 2, createdEnv: !!m.createdEnv,
+      telemetry: isMap(m.telemetry) ? { added: map(m.telemetry.added), replaced: map(m.telemetry.replaced), set: map(m.telemetry.set) } : null,
+      hooks: isMap(m.hooks) ? { createdHooks: !!m.hooks.createdHooks, createdEvents: events(m.hooks.createdEvents) } : null,
+    };
+  }
+  const added = map(m.added);
+  const replaced = map(m.replaced);
+  const createdEvents = events(m.createdEvents);
+  return {
+    v: 2, createdEnv: !!m.createdEnv,
+    telemetry: Object.keys(added).length || Object.keys(replaced).length ? { added, replaced, set: map(m.set) } : null,
+    hooks: countOurs(settings) || m.createdHooks || createdEvents.length ? { createdHooks: !!m.createdHooks, createdEvents } : null,
+  };
+}
+
+/** Puts the record back (or takes it out when nothing setup added is left). */
+function writeMark(settings, mark) {
+  if (!mark.telemetry && !mark.hooks) {
+    if (isMap(settings.env)) {
+      delete settings.env[MARK];
+      if (mark.createdEnv && !Object.keys(settings.env).length) delete settings.env;
+    }
+    return;
+  }
+  if (!isMap(settings.env)) { settings.env = {}; mark.createdEnv = true; }
+  settings.env[MARK] = JSON.stringify(mark);
+}
+
+function telemetryEnv(base) {
+  return {
     CLAUDE_CODE_ENABLE_TELEMETRY: '1',
     CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: '1',   // traces with agent_id and parent_agent_id
     OTEL_TRACES_EXPORTER: 'otlp',
     OTEL_LOGS_EXPORTER: 'otlp',
     OTEL_EXPORTER_OTLP_PROTOCOL: 'http/json',
-    OTEL_EXPORTER_OTLP_ENDPOINT: BASE,
+    OTEL_EXPORTER_OTLP_ENDPOINT: base,
     OTEL_TRACES_EXPORT_INTERVAL: '1000',
     OTEL_LOGS_EXPORT_INTERVAL: '1000',
   };
-  // The absolute path of Node: the desktop app doesn't always have "node" on its PATH.
-  const hookCommand = `"${process.execPath}" "${SELF}" hook ${BASE}/hook`;
+}
 
-  // ---- read
-  let raw = '';
-  if (fs.existsSync(SETTINGS)) raw = fs.readFileSync(SETTINGS, 'utf8');
-  let settings = {};
-  if (raw.trim()) {
-    try { settings = JSON.parse(raw); } catch (err) { fail(`Could not parse ${SETTINGS}: ${err.message}\nFix the JSON and run setup again. Nothing was changed.`); }
+/** Sets the telemetry variables that aren't set yet, recording each one. Returns the changes. */
+function addTelemetry(settings, mark, base) {
+  const ENV = telemetryEnv(base);
+  if (!isMap(settings.env)) { settings.env = {}; mark.createdEnv = true; }
+  const env = settings.env;
+  const t = mark.telemetry || { added: {}, replaced: {}, set: {} };
+  const current = env.OTEL_EXPORTER_OTLP_ENDPOINT;
+  // Setup's own endpoint (another --port), or one the user already agreed to replace (--force).
+  const ours = 'OTEL_EXPORTER_OTLP_ENDPOINT' in t.set && current === t.set.OTEL_EXPORTER_OTLP_ENDPOINT;
+  const consented = 'OTEL_EXPORTER_OTLP_ENDPOINT' in t.replaced;
+  if (current && current.replace(/\/$/, '') !== base && !flag('--force') && !ours && !consented) {
+    fail(`Your settings already send telemetry to ${current}.\n` +
+      'Claude Code sends OpenTelemetry to one endpoint, so pointing it at the relay would stop that.\n' +
+      'Run again with --force to switch it anyway (setup --remove puts it back), or with --no-telemetry\n' +
+      'to add only the hooks. Nothing was changed.');
   }
-  if (!settings || typeof settings !== 'object' || Array.isArray(settings)) fail(`${SETTINGS} is not a JSON object. Nothing was changed.`);
-
-  // ---- undo what an earlier setup added (in memory), so setup can run again with new options
-  function undo(s) {
-    let mark = null;
-    const env = s.env && typeof s.env === 'object' ? s.env : null;
-    if (env && typeof env[MARK] === 'string') { try { mark = JSON.parse(env[MARK]); } catch { mark = null; } }
-    let envRemoved = 0;
-    let hooksRemoved = 0;
-    if (env) {
-      if (mark) {
-        for (const [k, v] of Object.entries(mark.added || {})) if (env[k] === v) { delete env[k]; envRemoved++; }
-        for (const [k, v] of Object.entries(mark.replaced || {})) {
-          if (env[k] === (mark.set || {})[k]) { env[k] = v; envRemoved++; }
-        }
-      }
-      delete env[MARK];
-      if (mark && mark.createdEnv && !Object.keys(env).length) delete s.env;
-    }
-    if (s.hooks && typeof s.hooks === 'object') {
-      for (const [event, groups] of Object.entries(s.hooks)) {
-        if (!Array.isArray(groups)) continue;
-        const kept = [];
-        for (const g of groups) {
-          if (!g || !Array.isArray(g.hooks)) { kept.push(g); continue; }
-          const before = g.hooks.length;
-          const rest = g.hooks.filter(h => !(h && h.type === 'command' && typeof h.command === 'string' && OURS.test(h.command)));
-          hooksRemoved += before - rest.length;
-          if (rest.length === before) kept.push(g);
-          else if (rest.length) kept.push({ ...g, hooks: rest });
-        }
-        if (kept.length || !(mark && (mark.createdEvents || []).includes(event))) s.hooks[event] = kept;
-        else delete s.hooks[event];
-      }
-      if (mark && mark.createdHooks && !Object.keys(s.hooks).length) delete s.hooks;
-    }
-    return { mark, envRemoved, hooksRemoved };
+  for (const k of ['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT']) {
+    if (env[k]) console.warn(`Note: your settings set ${k}=${env[k]}, which takes priority over the relay for that signal.`);
   }
-
-  function backupAndWrite(obj) {
-    let bak = null;
-    if (fs.existsSync(SETTINGS)) {
-      bak = `${SETTINGS}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
-      fs.copyFileSync(SETTINGS, bak);
+  const changes = [];
+  for (const [k, v] of Object.entries(ENV)) {
+    if (env[k] === v) continue;
+    if (k in t.set && env[k] === t.set[k]) {
+      // Set by an earlier setup, to another value: the record of what was there before stays.
+      if (k in t.added) t.added[k] = v;
+    } else if (k in env) {
+      t.replaced[k] = env[k];
+      delete t.added[k];
+    } else {
+      t.added[k] = v;
+      delete t.replaced[k];
     }
-    fs.mkdirSync(path.dirname(SETTINGS), { recursive: true });
-    const tmp = `${SETTINGS}.tmp-${process.pid}`;
-    fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n');
-    fs.renameSync(tmp, SETTINGS);
-    return bak;
+    t.set[k] = v;
+    env[k] = v;
+    changes.push(`env ${k}=${v}`);
   }
+  mark.telemetry = t;
+  // Shell variables can take priority over settings for sessions started from that shell.
+  for (const k of [...Object.keys(ENV), 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', 'OTEL_METRICS_EXPORTER']) {
+    const shell = process.env[k];
+    if (shell !== undefined && shell !== ENV[k] && !(k === 'OTEL_EXPORTER_OTLP_ENDPOINT' && shell.replace(/\/$/, '') === base)) {
+      console.warn(`Note: your shell exports ${k}=${shell}. Sessions started from this shell may use it instead.`);
+    }
+  }
+  return changes;
+}
 
-  // ---- --remove
-  if (flag('--remove')) {
-    const { mark, envRemoved, hooksRemoved } = undo(settings);
-    if (!mark && !hooksRemoved) { console.log(`\nNothing to remove in ${SETTINGS}.\n`); return; }
-    if (PRINT) { console.log(`\nWould remove ${envRemoved} telemetry settings and ${hooksRemoved} hooks from ${SETTINGS}. Nothing was changed.\n`); return; }
-    const bak = backupAndWrite(settings);
-    console.log(`\nUpdated ${SETTINGS}${bak ? `\nBackup saved as ${bak}` : ''}\n  - ${envRemoved} telemetry settings\n  - ${hooksRemoved} hooks\nStart new Claude Code sessions for this to take effect.\n`);
+/** Takes out the telemetry variables setup set (and puts back what they replaced). Returns how many. */
+function removeTelemetry(settings, mark) {
+  const t = mark.telemetry;
+  if (!t) return 0;
+  const env = isMap(settings.env) ? settings.env : {};
+  let n = 0;
+  for (const [k, v] of Object.entries(t.added)) if (env[k] === (k in t.set ? t.set[k] : v)) { delete env[k]; n++; }
+  for (const [k, v] of Object.entries(t.replaced)) if (env[k] === t.set[k]) { env[k] = v; n++; }
+  mark.telemetry = null;
+  return n;
+}
+
+// One event's hook groups without setup's hooks.
+function withoutOurs(groups) {
+  const kept = [];
+  let removed = 0;
+  for (const g of groups) {
+    if (!g || !Array.isArray(g.hooks)) { kept.push(g); continue; }
+    const rest = g.hooks.filter(h => !isOurs(h));
+    removed += g.hooks.length - rest.length;
+    if (rest.length === g.hooks.length) kept.push(g);
+    else if (rest.length) kept.push({ ...g, hooks: rest });
+  }
+  return { kept, removed };
+}
+
+/** Adds the hook to each event that doesn't have exactly this one yet. Returns how many were written. */
+function addHooks(settings, mark, hookCommand) {
+  const h = mark.hooks || { createdHooks: false, createdEvents: [] };
+  if (!isMap(settings.hooks)) { settings.hooks = {}; h.createdHooks = true; }
+  let wrote = 0;
+  for (const event of HOOK_EVENTS) {
+    if (!Array.isArray(settings.hooks[event])) {
+      settings.hooks[event] = [];
+      if (!h.createdEvents.includes(event)) h.createdEvents.push(event);
+    }
+    const groups = settings.hooks[event];
+    const ours = groups.flatMap(g => (g && Array.isArray(g.hooks) ? g.hooks.filter(isOurs) : []));
+    if (ours.length === 1 && ours[0].command === hookCommand && ours[0].async === true && ours[0].timeout === 10) continue;
+    // Missing, twice, or from another port, file or version: one current hook instead.
+    const { kept } = withoutOurs(groups);
+    kept.push({ hooks: [{ type: 'command', command: hookCommand, async: true, timeout: 10 }] });
+    settings.hooks[event] = kept;
+    wrote++;
+  }
+  mark.hooks = h;
+  return wrote;
+}
+
+/** Takes out every hook setup added. Returns how many. */
+function removeHooks(settings, mark) {
+  const created = new Set(mark.hooks ? mark.hooks.createdEvents : []);
+  let n = 0;
+  if (isMap(settings.hooks)) {
+    for (const [event, groups] of Object.entries(settings.hooks)) {
+      if (!Array.isArray(groups)) continue;
+      const { kept, removed } = withoutOurs(groups);
+      n += removed;
+      if (kept.length || !created.has(event)) settings.hooks[event] = kept;
+      else delete settings.hooks[event];
+    }
+    if (mark.hooks && mark.hooks.createdHooks && !Object.keys(settings.hooks).length) delete settings.hooks;
+  }
+  mark.hooks = null;
+  return n;
+}
+
+function backupAndWrite(file, obj) {
+  let bak = null;
+  if (fs.existsSync(file)) {
+    bak = `${file}.backup-${new Date().toISOString().replace(/[:.]/g, '-')}`;
+    fs.copyFileSync(file, bak);
+  }
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp-${process.pid}`;
+  fs.writeFileSync(tmp, JSON.stringify(obj, null, 2) + '\n');
+  fs.renameSync(tmp, file);
+  return bak;
+}
+
+/**
+ * What answers on the relay's port: "plugin" (the relay the plugin starts), "manual" (a relay
+ * started by hand, which asks for its pairing code), "other" or "none". It asks /health as the lab
+ * page would, which a relay answers with its version and mode and nothing else.
+ */
+export function probeRelay(port, timeout = 800) {
+  return new Promise(resolve => {
+    const req = http.get({ host: '127.0.0.1', port, path: '/health', timeout, headers: { Origin: SITE_ORIGINS[0] } }, res => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('error', () => resolve({ state: 'other' }));
+      res.on('end', () => {
+        let body = null;
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = null; }
+        const version = body && typeof body.version === 'string' && TOKEN.test(body.version) ? body.version : null;
+        if (res.statusCode === 200 && body && body.ok === true) resolve({ state: body.mode === 'plugin' ? 'plugin' : 'manual', version });
+        else if (res.statusCode === 401) resolve({ state: 'manual', version });
+        else resolve({ state: 'other' });
+      });
+    });
+    req.on('timeout', () => { req.destroy(); resolve({ state: 'other' }); });
+    req.on('error', err => resolve({ state: err && err.code === 'ECONNREFUSED' ? 'none' : 'other' }));
+  });
+}
+
+// The relay's part of setup's "Next" steps: nothing to start when a relay already answers, or
+// when the plugin starts one.
+function relaySteps(found, port, { telemetry, fromPlugin }) {
+  const to = telemetry ? ': telemetry goes to it' : '';
+  const v = found.version ? ` ${found.version}` : '';
+  const portFlag = port === DEFAULT_PORT ? '' : ` --port ${port}`;
+  if (found.state === 'plugin') return { note: `The plugin's relay${v} is running on port ${port}${to}.` };
+  if (found.state === 'manual') return { note: `A relay started by hand${found.version ? ` (version ${found.version})` : ''} is running on port ${port}${to}.` };
+  if (found.state === 'other') {
+    return { step: `Something other than the relay answers on port ${port}. Stop it, or use another port for both:\n` +
+      `     node constellation-relay.mjs setup${telemetry ? '' : ' --no-telemetry'} --port <n>   and   node constellation-relay.mjs --port <n>` };
+  }
+  if (fromPlugin) return { note: `The plugin starts its relay on port ${port} when a session starts.` };
+  return { step: `Start the relay:  node constellation-relay.mjs${portFlag}` };
+}
+
+async function setup() {
+  const PORT = portArg();
+  const BASE = `http://127.0.0.1:${PORT}`;
+  const SETTINGS = settingsPath();
+  const PRINT = flag('--print');
+  const REMOVE = flag('--remove');
+  const TELEMETRY = !flag('--no-telemetry');
+  const HOOKS = !flag('--no-hooks');
+  // Run by the plugin's commands (/agent-constellation:telemetry, :remove-manual-hooks): the
+  // plugin sends the hook events and starts the relay itself.
+  const FROM_PLUGIN = flag('--plugin');
+  const scope = TELEMETRY && HOOKS ? '' : TELEMETRY ? ' --no-hooks' : ' --no-telemetry';
+
+  if (!TELEMETRY && !HOOKS) { console.log(`\nNothing to do with both --no-hooks and --no-telemetry. ${SETTINGS} was not changed.\n`); return; }
+  if (FROM_PLUGIN && HOOKS && !REMOVE) fail('The plugin sends the hook events itself: run setup with --no-hooks. Nothing was changed.');
+  const settings = readSettings(SETTINGS);
+  const mark = readMark(settings) || { v: 2, createdEnv: false, telemetry: null, hooks: null };
+
+  // ---- --remove (--no-hooks: telemetry only; --no-telemetry: hooks only)
+  if (REMOVE) {
+    const hadTelemetry = !!mark.telemetry;
+    const hadHooks = !!mark.hooks || countOurs(settings) > 0;
+    if (!(TELEMETRY && hadTelemetry) && !(HOOKS && hadHooks)) {
+      const what = TELEMETRY && HOOKS ? 'nothing that setup added' : TELEMETRY ? 'no telemetry that setup turned on' : 'no hooks that setup added';
+      console.log(`\nNothing to remove: ${SETTINGS} has ${what}. Nothing was changed.\n`);
+      return;
+    }
+    const lines = [];
+    if (TELEMETRY) lines.push(`  - ${removeTelemetry(settings, mark)} telemetry settings`);
+    if (HOOKS) lines.push(`  - ${removeHooks(settings, mark)} hooks`);
+    writeMark(settings, mark);
+    if (PRINT) { console.log(`\nWould update ${SETTINGS}. Nothing was changed.\n${lines.join('\n')}\n`); return; }
+    const bak = backupAndWrite(SETTINGS, settings);
+    console.log(`\nUpdated ${SETTINGS}${bak ? `\nBackup saved as ${bak}` : ''}\n${lines.join('\n')}`);
+    if (!HOOKS && countOurs(settings)) console.log(`The hooks setup added are still there. To remove them too:  ${FROM_PLUGIN ? PLUGIN_REMOVE_HOOKS : 'node constellation-relay.mjs setup --remove --no-telemetry'}`);
+    if (!TELEMETRY && mark.telemetry) console.log('Telemetry stays on.');
+    if (HOOKS && FROM_PLUGIN) console.log("The plugin's own hooks stay: they send the events from now on.");
+    console.log('Start a new Claude Code session (or quit and reopen the desktop app) for this to take effect.\n');
     return;
   }
 
-  // ---- add
-  const isMap = v => v && typeof v === 'object' && !Array.isArray(v);
-  if (settings.env !== undefined && !isMap(settings.env)) fail(`"env" in ${SETTINGS} is not an object. Nothing was changed.`);
-  if (settings.hooks !== undefined && !isMap(settings.hooks)) fail(`"hooks" in ${SETTINGS} is not an object. Nothing was changed.`);
-  const prev = undo(settings).mark;
-  const mark = { v: 1, added: {}, replaced: {}, set: {}, createdEnv: false, createdHooks: false, createdEvents: [] };
-  const changes = [];
+  // ---- add (or update): only what isn't set yet
+  // The absolute path of Node: the desktop app doesn't always have "node" on its PATH.
+  const hookCommand = `"${process.execPath}" "${SELF}" hook --via settings ${BASE}/hook`;
+  const changes = TELEMETRY ? addTelemetry(settings, mark, BASE) : [];
+  const hooksWritten = HOOKS ? addHooks(settings, mark, hookCommand) : 0;
+  if (hooksWritten) changes.push(`${hooksWritten} background hooks: ${hookCommand}`);
+  // What answers on the port decides the next steps (--print asks nothing).
+  const relay = PRINT ? null : relaySteps(await probeRelay(PORT), PORT, { telemetry: TELEMETRY, fromPlugin: FROM_PLUGIN });
 
-  if (!flag('--no-telemetry')) {
-    if (!settings.env) { settings.env = {}; mark.createdEnv = true; }
-    const env = settings.env;
-    const current = env.OTEL_EXPORTER_OTLP_ENDPOINT;
-    const consented = prev && prev.replaced && 'OTEL_EXPORTER_OTLP_ENDPOINT' in prev.replaced;
-    if (current && current.replace(/\/$/, '') !== BASE && !flag('--force') && !consented) {
-      fail(`Your settings already send telemetry to ${current}.\n` +
-        'Claude Code sends OpenTelemetry to one endpoint, so pointing it at the relay would stop that.\n' +
-        'Run again with --force to switch it anyway (setup --remove puts it back), or with --no-telemetry\n' +
-        'to add only the hooks. Nothing was changed.');
-    }
-    for (const k of ['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT']) {
-      if (env[k]) console.warn(`Note: your settings set ${k}=${env[k]}, which takes priority over the relay for that signal.`);
-    }
-    for (const [k, v] of Object.entries(ENV)) {
-      if (env[k] === v) continue;
-      if (k in env) mark.replaced[k] = env[k]; else mark.added[k] = v;
-      mark.set[k] = v;
-      env[k] = v;
-      changes.push(`env ${k}=${v}`);
-    }
-    // Shell variables can take priority over settings for sessions started from that shell.
-    for (const k of [...Object.keys(ENV), 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', 'OTEL_METRICS_EXPORTER']) {
-      const shell = process.env[k];
-      if (shell !== undefined && shell !== ENV[k] && !(k === 'OTEL_EXPORTER_OTLP_ENDPOINT' && shell.replace(/\/$/, '') === BASE)) {
-        console.warn(`Note: your shell exports ${k}=${shell}. Sessions started from this shell may use it instead.`);
-      }
-    }
+  if (!changes.length) {
+    console.log(`\nAlready set; nothing changed in ${SETTINGS}.`);
+    if (relay) console.log(relay.note || `Next: ${relay.step}`);
+    console.log('');
+    return;
   }
-
-  if (!flag('--no-hooks')) {
-    if (!settings.hooks) { settings.hooks = {}; mark.createdHooks = true; }
-    for (const event of HOOK_EVENTS) {
-      if (!Array.isArray(settings.hooks[event])) { settings.hooks[event] = []; mark.createdEvents.push(event); }
-      settings.hooks[event].push({ hooks: [{ type: 'command', command: hookCommand, async: true, timeout: 10 }] });
-    }
-    changes.push(`${HOOK_EVENTS.length} background hooks: ${hookCommand}`);
-  }
-
-  if (!changes.length) { console.log(`\nNothing to add (--no-hooks and --no-telemetry). ${SETTINGS} was not changed.\n`); return; }
-  // The record of what was added lives next to the telemetry settings.
-  if (!settings.env) { settings.env = {}; mark.createdEnv = true; }
-  settings.env[MARK] = JSON.stringify(mark);
-
+  writeMark(settings, mark);
   if (PRINT) {
     console.log(`\nWould update ${SETTINGS}. Nothing was changed.\n`);
     for (const c of changes) console.log(`  + ${c}`);
@@ -1105,18 +1353,96 @@ function setup() {
     return;
   }
 
-  const bak = backupAndWrite(settings);
+  const bak = backupAndWrite(SETTINGS, settings);
   console.log(`\nUpdated ${SETTINGS}${bak ? `\nBackup saved as ${bak}` : ''}`);
   for (const c of changes) console.log(`  + ${c}`);
-  console.log(`
-Next:
-  1. Start the relay:  node constellation-relay.mjs${PORT === DEFAULT_PORT ? '' : ` --port ${PORT}`}
-  2. Start a new Claude Code session (or quit and reopen the desktop app).
-     Settings are read when a session starts.
+  const steps = [];
+  if (relay.step) steps.push(relay.step);
+  steps.push('Start a new Claude Code session (or quit and reopen the desktop app).\n     Settings are read when a session starts.');
+  console.log(`${relay.note ? `\n${relay.note}` : ''}\nNext:`);
+  steps.forEach((s, i) => console.log(`  ${i + 1}. ${s}`));
+  const undo = FROM_PLUGIN ? PLUGIN_TELEMETRY_OFF : `node constellation-relay.mjs setup --remove${scope}`;
+  console.log(`\nTo undo:  ${undo}`);
+  if (hooksWritten) console.log('The hooks run this file from where it is now. If you move it or change Node versions, run setup again.');
+  console.log('');
+}
 
-To undo:  node constellation-relay.mjs setup --remove
-The hooks run this file from where it is now. If you move it or change Node versions, run setup again.
+// ---------------------------------------------------------------- status
+
+async function status() {
+  const PORT = portArg();
+  const BASE = `http://127.0.0.1:${PORT}`;
+  const SETTINGS = settingsPath();
+  const FROM_PLUGIN = flag('--plugin');
+  let settings = {};
+  let note = '';
+  if (!fs.existsSync(SETTINGS)) note = ' (no such file yet)';
+  else {
+    try {
+      const raw = fs.readFileSync(SETTINGS, 'utf8');
+      settings = raw.trim() ? JSON.parse(raw) : {};
+      if (!isMap(settings)) { settings = {}; note = ' (not a JSON object)'; }
+    } catch { settings = {}; note = ' (could not be parsed)'; }
+  }
+  const env = isMap(settings.env) ? settings.env : {};
+  const mark = readMark(settings);
+  const endpoint = typeof env.OTEL_EXPORTER_OTLP_ENDPOINT === 'string' ? env.OTEL_EXPORTER_OTLP_ENDPOINT : '';
+  const on = env.CLAUDE_CODE_ENABLE_TELEMETRY === '1' && endpoint;
+  const toRelay = on && endpoint.replace(/\/$/, '') === BASE;
+  const telemetry = !on ? 'off'
+    : toRelay ? `on, to the relay (${BASE})${mark && mark.telemetry ? '' : ', not set by setup'}`
+    : `on, to ${endpoint} (not the relay on port ${PORT})`;
+  const hooks = countOurs(settings);
+  const found = await probeRelay(PORT);
+  const v = found.version ? `, version ${found.version}` : '';
+  const relay = found.state === 'plugin' ? `the plugin's relay${v}`
+    : found.state === 'manual' ? `a relay started by hand${v || ' (version 1.2 or earlier)'}; it asks for its pairing code`
+    : found.state === 'other' ? 'something other than the relay'
+    : 'nothing (the plugin starts its relay when a session starts)';
+  console.log(`
+Settings file: ${SETTINGS}${note}
+  Telemetry:              ${telemetry}
+  Hooks that setup added: ${hooks ? `${hooks}${FROM_PLUGIN ? ': the plugin sends the same events, so each one arrives twice' : ''}` : 'none'}
+Relay on port ${PORT}: ${relay}
 `);
+  if (FROM_PLUGIN) {
+    console.log(`Turn telemetry ${on && toRelay ? 'off:  /agent-constellation:telemetry off' : 'on:   /agent-constellation:telemetry on'}`);
+    if (hooks) console.log(`Remove the manual hooks:  ${PLUGIN_REMOVE_HOOKS}`);
+    console.log('');
+  }
+}
+
+// ---------------------------------------------------------------- the relay in the background
+
+// The relay in plugin mode, detached from whoever starts it, with nothing attached to its input or
+// output. If another one takes the port first, this one exits at once.
+function spawnPluginRelay(port) {
+  const args = [SELF, '--plugin', '--port', String(port)];
+  for (const o of String(process.env[ENV_ORIGINS] || '').split(',').map(s => s.trim()).filter(Boolean)) args.push('--origin', o);
+  let home;
+  try { home = os.homedir(); } catch { home = undefined; }
+  const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', cwd: home, windowsHide: true });
+  child.on('error', () => {});
+  child.unref();
+}
+
+/**
+ * Makes sure a relay answers on the port, as the plugin's hooks do: when nothing listens there,
+ * starts one in plugin mode and waits until it answers (at most `wait` ms). Resolves to what
+ * answers then ({ state: "plugin" | "manual" | "other" | "none", version, started }). Used by the
+ * plugin's /agent-constellation:open.
+ */
+export async function ensureRelay({ port = DEFAULT_PORT, wait = 3000 } = {}) {
+  let found = await probeRelay(port);
+  if (found.state !== 'none') return { ...found, started: false };
+  spawnPluginRelay(port);
+  const until = Date.now() + wait;
+  while (Date.now() < until) {
+    await new Promise(r => setTimeout(r, 100));
+    found = await probeRelay(port, 500);
+    if (found.state !== 'none') return { ...found, started: true };
+  }
+  return { ...found, started: true };
 }
 
 // ---------------------------------------------------------------- hook: the forwarder
@@ -1140,20 +1466,21 @@ function hookForward() {
   let port = DEFAULT_PORT;
   const envPort = Number(process.env[ENV_PORT]);
   if (Number.isInteger(envPort) && envPort > 0 && envPort < 65536) port = envPort;
+  // hook [--start] [--via plugin|settings] [<url>]
+  let url;
+  let via;
+  for (let i = 1; i < argv.length; i++) {
+    if (argv[i] === '--via') via = argv[++i];
+    else if (!argv[i].startsWith('-') && !url) url = argv[i];
+  }
   let target;
-  try { target = new URL(argv.slice(1).find(a => !a.startsWith('-')) || `http://127.0.0.1:${port}/hook`); } catch { return done(); }
+  try { target = new URL(url || `http://127.0.0.1:${port}/hook`); } catch { return done(); }
   if (target.protocol !== 'http:' || !/^(127\.0\.0\.1|localhost|\[::1\])$/.test(target.hostname)) return done();
 
   let started = false;
   function startRelayInBackground() {
     started = true;
-    const args = [SELF, '--plugin', '--port', target.port || '80'];
-    for (const o of String(process.env[ENV_ORIGINS] || '').split(',').map(s => s.trim()).filter(Boolean)) args.push('--origin', o);
-    let home;
-    try { home = os.homedir(); } catch { home = undefined; }
-    const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', cwd: home, windowsHide: true });
-    child.on('error', () => {});
-    child.unref();
+    spawnPluginRelay(target.port || '80');
   }
 
   function post(body) {
@@ -1194,6 +1521,9 @@ function hookForward() {
     for (const k of ['transcript_path', 'agent_transcript_path']) {
       if (typeof raw[k] === 'string' && raw[k].length < 4096) payload[k] = raw[k];
     }
+    // Which hooks ran this (the plugin's, or the ones setup added): for the relay only, which
+    // drops the second copy of an event when both are installed.
+    if (via === 'plugin' || via === 'settings') payload.via = via;
     post(Buffer.from(JSON.stringify(payload)));
   });
 }
@@ -1206,6 +1536,7 @@ if (isMain) {
   if (flag('--help') || flag('-h') || command === 'help') console.log(HELP);
   else if (command === 'start') startRelay();
   else if (command === 'setup') setup();
+  else if (command === 'status') status();
   else if (command === 'hook') hookForward();
   else fail(`Unknown command "${command}". Run: node constellation-relay.mjs --help`);
 }
