@@ -10,5 +10,8 @@
   "repository": "https://github.com/diegobianqui/agent-constellation",
   "license": "MIT",
   "icon": "./.claude-plugin/icon.png",
+  "documentationUrl": "https://github.com/diegobianqui/agent-constellation#readme",
+  "supportUrl": "https://github.com/diegobianqui/agent-constellation/issues",
+  "privacyPolicyUrl": "https://diegobianqui.com/privacy",
   "keywords": ["observability", "hooks", "visualization", "agents", "privacy"]
 }
