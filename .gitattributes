@@ -1,0 +1,4 @@
+# The same bytes on every OS: the relay is a byte-for-byte copy of the site's (scripts/sync-relay.mjs
+# compares them), and the tests and Claude Code read the skills and the README line by line.
+* text=auto eol=lf
+*.png binary

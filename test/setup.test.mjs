@@ -15,8 +15,10 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { relayPids } from './processes.mjs';
 
-const ROOT = path.join(import.meta.dirname, '..');
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
 const PLUGIN = path.join(ROOT, 'plugins', 'agent-constellation');
 const RELAY = path.join(PLUGIN, 'relay', 'constellation-relay.mjs');
 const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'constellation-setup-test-')));
@@ -531,9 +533,8 @@ test('open: starts the relay when none runs, finds it when it does (browser not 
     const h = await health(port);
     assert.equal(h.mode, 'plugin');
   } finally {
-    const ps = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' });
-    for (const l of ps.split('\n').filter(x => x.includes(`--plugin --port ${port}`))) {
-      try { process.kill(Number(l.trim().split(/\s+/)[0]), 'SIGTERM'); } catch { /* gone */ }
+    for (const pid of relayPids(port)) {
+      try { process.kill(pid, 'SIGTERM'); } catch { /* gone */ }
     }
   }
 });

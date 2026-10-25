@@ -12,9 +12,10 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 const DEFAULT_SOURCE = 'https://diegobianqui.com/relay/constellation-relay.mjs';
-const COPY = path.join(import.meta.dirname, '..', 'plugins', 'agent-constellation', 'relay', 'constellation-relay.mjs');
+const COPY = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'plugins', 'agent-constellation', 'relay', 'constellation-relay.mjs');
 
 const args = process.argv.slice(2);
 const check = args.includes('--check');

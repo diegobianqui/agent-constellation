@@ -10,9 +10,10 @@ import { spawnSync, execFileSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = path.join(import.meta.dirname, '..');
-const README = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8');
+const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
+const README = fs.readFileSync(path.join(ROOT, 'README.md'), 'utf8').replace(/\r\n/g, '\n');
 const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'constellation-install-test-')));
 after(() => fs.rmSync(TMP, { recursive: true, force: true }));
 
@@ -27,6 +28,9 @@ const update = messages.find(m => m.startsWith('Update the agent-constellation p
 let realClaude = null;
 try { realClaude = fs.realpathSync(execFileSync('sh', ['-c', 'command -v claude'], { encoding: 'utf8' }).trim()); } catch { realClaude = null; }
 const SHELL = fs.existsSync('/bin/zsh') ? '/bin/zsh' : '/bin/sh';
+// The message's command is a POSIX shell command, run here with /bin/sh and symbolic links in a
+// fake HOME. On Windows the end-to-end test (e2e/e2e.mjs) runs it in Git Bash instead.
+const WIN = process.platform === 'win32' && 'Windows: run in Git Bash by e2e/e2e.mjs';
 const noNode = !['/usr/bin/node', '/bin/node'].some(f => fs.existsSync(f));
 
 function sandbox(name, { desktopCopy = true } = {}) {
@@ -69,7 +73,7 @@ test('the README has both messages, each with one exact command and the same ins
   assert.equal(head(commandOf(install)), head(commandOf(update)));
 });
 
-test('install: no claude on the PATH, the desktop app\'s copy found; twice is harmless; update', { skip: !realClaude && 'no claude command here' }, () => {
+test('install: no claude on the PATH, the desktop app\'s copy found; twice is harmless; update', { skip: WIN || (!realClaude && 'no claude command here') }, () => {
   const box = sandbox('install');
   const PATH = `${box.bin}:/usr/bin:/bin`;
   assert.notEqual(spawnSync(SHELL, ['-c', 'command -v claude'], { env: { PATH } }).status, 0, 'no claude on this PATH');
@@ -89,7 +93,7 @@ test('install: no claude on the PATH, the desktop app\'s copy found; twice is ha
   assert.match(up.out, /already at the latest version|updated from/);
 });
 
-test('install: Node.js missing, one plain line and exit 1', { skip: (!realClaude && 'no claude command here') || (!noNode && 'node in /usr/bin') }, () => {
+test('install: Node.js missing, one plain line and exit 1', { skip: WIN || (!realClaude && 'no claude command here') || (!noNode && 'node in /usr/bin') }, () => {
   const box = sandbox('no-node');
   const r = run(commandOf(install), box, '/usr/bin:/bin');
   assert.equal(r.code, 1);
@@ -97,7 +101,7 @@ test('install: Node.js missing, one plain line and exit 1', { skip: (!realClaude
   assert.ok(!fs.existsSync(path.join(box.config, 'plugins')), 'nothing installed');
 });
 
-test('install: no Claude Code command anywhere, one plain line and exit 1', () => {
+test('install: no Claude Code command anywhere, one plain line and exit 1', { skip: WIN }, () => {
   const box = sandbox('no-claude', { desktopCopy: false });
   const r = run(commandOf(install), box, `${box.bin}:/usr/bin:/bin`);
   assert.equal(r.code, 1);

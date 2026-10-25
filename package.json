@@ -7,8 +7,11 @@
   "type": "module",
   "engines": { "node": ">=18" },
   "scripts": {
-    "test": "node --test test/*.test.mjs",
+    "test": "node --test test/install-command.test.mjs test/relay-plugin.test.mjs test/setup.test.mjs",
     "sync-relay": "node scripts/sync-relay.mjs",
     "check-relay": "node scripts/sync-relay.mjs --check"
+  },
+  "config": {
+    "claudeCodeVersion": "2.1.296"
   }
 }

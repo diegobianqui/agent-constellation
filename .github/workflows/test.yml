@@ -1,0 +1,65 @@
+# Tests on Linux, macOS and Windows. No secrets: Claude Code runs with a dummy API key against a
+# closed port or the stand-in API in e2e/mock-api.mjs, in a temp HOME and CLAUDE_CONFIG_DIR.
+name: test
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  unit:
+    name: npm test (${{ matrix.os }}, Node ${{ matrix.node }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        node: [18, 22]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # the tests read older relays from the history
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ matrix.node }}
+      - name: Claude Code's CLI (for the install message tests)
+        shell: bash
+        run: npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$(node -p "require('./package.json').config.claudeCodeVersion")" && claude --version
+      - run: npm test
+
+  e2e:
+    name: e2e (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: linux, os: ubuntu-latest, shell: bash, args: --github }
+          - { name: macos, os: macos-latest, shell: bash, args: --github }
+          - { name: "windows, Git Bash", os: windows-latest, shell: bash, args: --github }
+          - { name: "windows, PowerShell", os: windows-latest, shell: pwsh, args: --github }
+          # Git Bash hidden from Claude Code: it runs hooks and commands with PowerShell (and
+          # without git, nothing is installed from GitHub).
+          - { name: "windows, PowerShell, no Git Bash", os: windows-latest, shell: pwsh, args: --no-git-bash }
+    defaults:
+      run:
+        shell: ${{ matrix.shell }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+      - name: Claude Code's CLI
+        shell: bash
+        run: npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$(node -p "require('./package.json').config.claudeCodeVersion")"
+      - name: End-to-end
+        timeout-minutes: 12
+        run: node e2e/e2e.mjs ${{ matrix.args }}

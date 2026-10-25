@@ -6,15 +6,18 @@
 // folder in every child process, and every relay runs on a free port other than 4318.
 import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { spawn, execFileSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import http from 'node:http';
 import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { relayPids } from './processes.mjs';
 
-const RELAY = path.join(import.meta.dirname, '..', 'plugins', 'agent-constellation', 'relay', 'constellation-relay.mjs');
-const HOOKS = path.join(import.meta.dirname, '..', 'plugins', 'agent-constellation', 'hooks', 'hooks.json');
+const HERE = path.dirname(fileURLToPath(import.meta.url));
+const RELAY = path.join(HERE, '..', 'plugins', 'agent-constellation', 'relay', 'constellation-relay.mjs');
+const HOOKS = path.join(HERE, '..', 'plugins', 'agent-constellation', 'hooks', 'hooks.json');
 const TMP = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), 'constellation-plugin-test-')));
 const CONFIG = path.join(TMP, 'claude-config');
 // CONSTELLATION_RELAY_PORT: a port nothing listens on, so a command that defaults to the relay's
@@ -93,11 +96,6 @@ function openStream(port, origin = PAGE) {
     });
     req.on('error', reject);
   });
-}
-
-function relayPids(port) {
-  const ps = execFileSync('ps', ['-Ao', 'pid=,command='], { encoding: 'utf8' });
-  return ps.split('\n').filter(l => l.includes('constellation-relay.mjs --plugin --port ' + port + ' ') || l.endsWith('constellation-relay.mjs --plugin --port ' + port)).map(l => Number(l.trim().split(/\s+/)[0]));
 }
 
 // ------------------------------------------------------------ the plugin's hooks
@@ -238,9 +236,11 @@ test('hook --start: one relay for many hooks at once; all events arrive', async 
   const env = { ...ENV, CONSTELLATION_RELAY_PORT: String(port), CONSTELLATION_RELAY_ORIGINS: PAGE };
   const runs = await Promise.all(Array.from({ length: 6 }, (_, i) =>
     hook(['--start'], { hook_event_name: 'SessionStart', session_id: `sess-start-${i}`, source: 'startup', transcript_path: '/nowhere/x.jsonl' }, env)));
+  // On Windows a hook that starts the relay may wait up to 6 s (see hookTimes).
+  const limit = process.platform === 'win32' ? 7000 : 2600;
   for (const r of runs) {
     assert.deepEqual([r.code, r.out, r.err], [0, '', '']);
-    assert.ok(r.ms < 2600, `took ${r.ms} ms`);
+    assert.ok(r.ms < limit, `took ${r.ms} ms`);
   }
   await sleep(800);
   const pids = relayPids(port);
