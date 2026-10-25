@@ -11,7 +11,8 @@
 // --no-git-bash  Windows only: hide Git Bash from Claude Code (PATH without Git, no
 //                CLAUDE_CODE_GIT_BASH_PATH; CI also renames C:\Program Files\Git), so it runs hooks
 //                and commands with PowerShell
-// --powershell-tool  run the plugin's commands with the PowerShell tool when Claude Code offers it
+// --powershell-tool  turn on Claude Code's PowerShell tool (CLAUDE_CODE_USE_POWERSHELL_TOOL=1) and run
+//                the plugin's commands with it
 //
 // It needs port 4318 free (the plugin's hooks start their relay there): it refuses to run when
 // anything listens on it, so it never touches a relay you are running. Everything else lives in a
@@ -38,8 +39,8 @@ const WIN = process.platform === 'win32';
 const args = process.argv.slice(2);
 const GITHUB = args.includes('--github');
 const NO_GIT_BASH = args.includes('--no-git-bash');
-// --powershell-tool: the stand-in model runs the commands with the PowerShell tool whenever Claude
-// Code offers it (on Windows it does even with Git Bash, and may prefer it).
+// --powershell-tool: Claude Code's PowerShell tool on, and the stand-in model runs the commands with
+// it (on Windows a model may pick it even with Git Bash there).
 const PREFER_POWERSHELL = args.includes('--powershell-tool');
 const REPORT = args.includes('--report') ? args[args.indexOf('--report') + 1] : process.env.E2E_REPORT;
 const SECRET = 'PROMPT-SECRET-e2e-7f3a';
@@ -100,6 +101,9 @@ function envFor(config, extra = {}) {
     ANTHROPIC_API_KEY: 'sk-ant-e2e-dummy-key',
   }, extra);
   if (WIN) env.USERPROFILE = HOME;
+  // The PowerShell tool next to the Bash tool (Claude Code turns it on by default only for some
+  // accounts, and without Git Bash on Windows).
+  if (PREFER_POWERSHELL) env.CLAUDE_CODE_USE_POWERSHELL_TOOL = '1';
   return env;
 }
 

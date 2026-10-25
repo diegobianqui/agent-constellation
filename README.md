@@ -282,8 +282,9 @@ push and pull request, on GitHub's Ubuntu, macOS and Windows runners:
   and opens the lab's address; and the desktop install message's command (no `claude`: the one-line
   error; with `claude`: installs, and a second time says "already installed").
 - On Windows, three ways: started from Git Bash; started from PowerShell, with the commands run by
-  Claude Code's PowerShell tool (on by default on Windows, next to the Bash tool); and with Git for
-  Windows hidden, where Claude Code runs the hooks and the commands with PowerShell. All of the
+  Claude Code's PowerShell tool next to Git Bash (`CLAUDE_CODE_USE_POWERSHELL_TOOL=1`; some accounts
+  have it on by default); and with Git for Windows hidden, where Claude Code runs the hooks and the
+  commands with PowerShell. All of the
   above passes in each, and `start` opens the runner's default browser at the lab's address (the
   test points it at a local page and sees the browser ask for it, `&` and all). The desktop install
   message is a POSIX shell command, so it needs Git Bash: without it, use the two `claude plugin`
