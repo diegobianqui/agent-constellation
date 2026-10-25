@@ -1387,6 +1387,19 @@ function withoutOurs(groups) {
   return { kept, removed };
 }
 
+/**
+ * The command of the hooks setup adds. On macOS and Linux: Node's absolute path, since the desktop
+ * app doesn't always have "node" on its PATH. On Windows: a bare `node`, as the plugin's hooks run
+ * it (Node's installer puts it on the PATH), and forward slashes: Claude Code runs hooks there with
+ * Git Bash or, without it, PowerShell, which prints a command line that starts with a quoted path
+ * instead of running it.
+ */
+export function manualHookCommand(platform, execPath, self, base) {
+  return platform === 'win32'
+    ? `node "${self.replace(/\\/g, '/')}" hook --via settings ${base}/hook`
+    : `"${execPath}" "${self}" hook --via settings ${base}/hook`;
+}
+
 /** Adds the hook to each event that doesn't have exactly this one yet. Returns how many were written. */
 function addHooks(settings, mark, hookCommand) {
   const h = mark.hooks || { createdHooks: false, createdEvents: [] };
@@ -1531,8 +1544,7 @@ async function setup() {
   }
 
   // ---- add (or update): only what isn't set yet
-  // The absolute path of Node: the desktop app doesn't always have "node" on its PATH.
-  const hookCommand = `"${process.execPath}" "${SELF}" hook --via settings ${BASE}/hook`;
+  const hookCommand = manualHookCommand(process.platform, process.execPath, SELF, BASE);
   const changes = TELEMETRY ? addTelemetry(settings, mark, BASE) : [];
   const hooksWritten = HOOKS ? addHooks(settings, mark, hookCommand) : 0;
   if (hooksWritten) changes.push(`${hooksWritten} background hooks: ${hookCommand}`);

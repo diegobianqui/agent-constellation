@@ -4,11 +4,13 @@ description: Removes the constellation relay hooks that were added by hand to th
 disable-model-invocation: true
 allowed-tools:
   - 'Bash(node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --remove --no-telemetry --plugin)'
+  - 'PowerShell(node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --remove --no-telemetry --plugin)'
 ---
 
 # Remove the manual constellation hooks
 
-Run exactly this command with the Bash tool, and nothing else:
+Run exactly this command with the Bash tool (on Windows, the PowerShell tool works too: the command
+is the same in both), and nothing else:
 
 `node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --remove --no-telemetry --plugin`
 

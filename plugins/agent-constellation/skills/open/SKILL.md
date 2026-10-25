@@ -4,11 +4,13 @@ description: Opens the agent constellation lab in the user's browser, connected 
 disable-model-invocation: true
 allowed-tools:
   - 'Bash(node "${CLAUDE_PLUGIN_ROOT}/scripts/open-lab.mjs")'
+  - 'PowerShell(node "${CLAUDE_PLUGIN_ROOT}/scripts/open-lab.mjs")'
 ---
 
 # Open the agent constellation lab
 
-Run exactly this command with the Bash tool, and nothing else:
+Run exactly this command with the Bash tool (on Windows, the PowerShell tool works too: the command
+is the same in both), and nothing else:
 
 `node "${CLAUDE_PLUGIN_ROOT}/scripts/open-lab.mjs"`
 

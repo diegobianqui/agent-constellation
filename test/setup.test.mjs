@@ -122,9 +122,11 @@ test('the commands: user-invoked skills that run exactly the commands they pre-a
     assert.match(front, new RegExp(`^name: ${name}$`, 'm'));
     assert.match(front, /^disable-model-invocation: true$/m, `${name}: Claude never runs it on its own`);
     assert.match(front, /^description: .{20,}/m);
-    const allowed = [...front.matchAll(/^ {2}- 'Bash\((.+)\)'$/gm)].map(m => m[1]);
+    // The same commands for the Bash tool and the PowerShell tool (Windows: Claude Code may run
+    // commands with either), and nothing else.
+    const allowed = [...front.matchAll(/^ {2}- '(.+)'$/gm)].map(m => m[1]);
     const run = c => `node "\${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" ${c}`;
-    assert.deepEqual(allowed, commands.map(run), `${name}: allowed-tools`);
+    assert.deepEqual(allowed, [...commands.map(c => `Bash(${run(c)})`), ...commands.map(c => `PowerShell(${run(c)})`)], `${name}: allowed-tools`);
     for (const c of commands) assert.ok(body.includes('`' + run(c) + '`'), `${name}: body names ${c}`);
     // Nothing that would add hooks, force an endpoint or touch anything else.
     assert.ok(!/setup --plugin|--force --plugin|rm |curl /.test(body.replace(/--force`? themselves/, '')), `${name}: no other commands`);
@@ -470,7 +472,7 @@ test('open: a user-invoked skill that runs only the open script', () => {
   assert.match(front, /^name: open$/m);
   assert.match(front, /^disable-model-invocation: true$/m);
   const cmd = 'node "${CLAUDE_PLUGIN_ROOT}/scripts/open-lab.mjs"';
-  assert.deepEqual([...front.matchAll(/^ {2}- 'Bash\((.+)\)'$/gm)].map(m => m[1]), [cmd]);
+  assert.deepEqual([...front.matchAll(/^ {2}- '(.+)'$/gm)].map(m => m[1]), [`Bash(${cmd})`, `PowerShell(${cmd})`]);
   assert.ok(body.includes('`' + cmd + '`'));
   // No hook opens anything: the hooks only run the forwarder.
   const hooks = fs.readFileSync(path.join(PLUGIN, 'hooks', 'hooks.json'), 'utf8');
@@ -561,6 +563,18 @@ test('hooks.json: the same command line works in sh, Git Bash and PowerShell', (
       assert.equal(h.shell, undefined, `${event}: the default shell (Git Bash, or PowerShell without it)`);
     }
   }
+});
+
+test('the hooks setup adds: a command line that runs in sh, Git Bash and PowerShell', async () => {
+  const { manualHookCommand } = await import(pathToFileURL(RELAY).href);
+  // macOS and Linux: Node's absolute path (the desktop app may have no node on its PATH).
+  assert.equal(manualHookCommand('darwin', '/opt/homebrew/bin/node', '/Users/ana/relay/constellation-relay.mjs', 'http://127.0.0.1:4318'),
+    '"/opt/homebrew/bin/node" "/Users/ana/relay/constellation-relay.mjs" hook --via settings http://127.0.0.1:4318/hook');
+  // Windows: a bare node first (PowerShell would print a quoted path instead of running it) and
+  // forward slashes (the same file in Git Bash and PowerShell).
+  const win = manualHookCommand('win32', 'C:\\Program Files\\nodejs\\node.exe', 'C:\\Users\\Ana Lopez\\relay\\constellation-relay.mjs', 'http://127.0.0.1:4318');
+  assert.equal(win, 'node "C:/Users/Ana Lopez/relay/constellation-relay.mjs" hook --via settings http://127.0.0.1:4318/hook');
+  assert.match(win, /constellation-relay\.mjs"? hook /, 'found again by setup --remove');
 });
 
 test('transcript paths as Claude Code writes them on Windows: read; anything else ignored', async () => {

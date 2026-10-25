@@ -7,14 +7,18 @@ allowed-tools:
   - 'Bash(node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --no-hooks --plugin)'
   - 'Bash(node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --remove --no-hooks --plugin)'
   - 'Bash(node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" status --plugin)'
+  - 'PowerShell(node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --no-hooks --plugin)'
+  - 'PowerShell(node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --remove --no-hooks --plugin)'
+  - 'PowerShell(node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" status --plugin)'
 ---
 
 # Telemetry for the agent constellation lab
 
 The user typed: `/agent-constellation:telemetry $ARGUMENTS`
 
-Run exactly one of these commands with the Bash tool, chosen by the first word the user typed, and
-nothing else. Copy it exactly as written here.
+Run exactly one of these commands with the Bash tool (on Windows, the PowerShell tool works too: the
+commands are the same in both), chosen by the first word the user typed, and nothing else. Copy it
+exactly as written here.
 
 - `on`: `node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --no-hooks --plugin`
 - `off`: `node "${CLAUDE_PLUGIN_ROOT}/relay/constellation-relay.mjs" setup --remove --no-hooks --plugin`

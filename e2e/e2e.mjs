@@ -58,6 +58,12 @@ const HOME = path.join(TMP, 'home');
 const PROJECT = path.join(TMP, 'project-e2e');
 const STUBS = path.join(TMP, 'stubs');
 const OPENED = path.join(TMP, 'opened.txt');
+// What the stubbed opener recorded, once it has `n` lines (it runs detached: it may write a moment
+// after the open script has exited).
+const opened = async (n = 1) => (await waitFor(() => {
+  const lines = fs.existsSync(OPENED) ? fs.readFileSync(OPENED, 'utf8').trim().split('\n').filter(Boolean) : [];
+  return lines.length >= n ? lines : null;
+}, 5000, 100)) || (fs.existsSync(OPENED) ? fs.readFileSync(OPENED, 'utf8').trim().split('\n').filter(Boolean) : []);
 for (const d of [HOME, PROJECT, STUBS]) fs.mkdirSync(d, { recursive: true });
 
 // The PATH Claude Code gets. --no-git-bash: without Git's folders, so Claude Code finds no Git Bash.
@@ -304,7 +310,7 @@ async function main() {
   const [cmdRemove] = skillCommands('remove-manual-hooks');
   fs.rmSync(OPENED, { force: true });
   await skill('/agent-constellation:open', cmdOpen, /^Opened .* in your browser; the plugin's relay .* is running on port 4318\.$/);
-  if (!WIN) check('open: the opener got the lab URL', fs.existsSync(OPENED) && fs.readFileSync(OPENED, 'utf8').trim() === LAB_URL, fs.existsSync(OPENED) ? fs.readFileSync(OPENED, 'utf8') : 'opener not called');
+  if (!WIN) { const l = await opened(1); check('open: the opener got the lab URL', l.length === 1 && l[0] === LAB_URL, l.join('\n') || 'opener not called'); }
   await skill('/agent-constellation:telemetry', cmdStatus, /Telemetry: +off[\s\S]*Relay on port 4318: the plugin's relay/);
   await skill('/agent-constellation:telemetry on', cmdOn, /Updated [\s\S]*OTEL_EXPORTER_OTLP_ENDPOINT=http:\/\/127\.0\.0\.1:4318/);
   const sOn = JSON.parse(fs.readFileSync(path.join(CONFIG, 'settings.json'), 'utf8'));
@@ -364,7 +370,7 @@ async function main() {
     const hit = await waitFor(() => browser.hits.find(u => u.includes('connect=claude-code') && u.includes('e2e=1')), 30000);
     check('start opened the default browser at the lab URL, & included', hit, `requests seen: ${browser.hits.join(' ') || 'none'}`, { info: !hit });
   } else {
-    const lines = fs.existsSync(OPENED) ? fs.readFileSync(OPENED, 'utf8').trim().split('\n') : [];
+    const lines = await opened(2);
     check(`${process.platform === 'darwin' ? 'open' : 'xdg-open'} called with the lab URL, twice`, lines.length === 2 && lines.every(l => l === LAB_URL), lines.join('\n') || 'not called');
   }
   browser.close();
