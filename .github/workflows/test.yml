@@ -43,7 +43,9 @@ jobs:
           - { name: linux, os: ubuntu-latest, shell: bash, args: --github }
           - { name: macos, os: macos-latest, shell: bash, args: --github }
           - { name: "windows, Git Bash", os: windows-latest, shell: bash, args: --github }
-          - { name: "windows, PowerShell", os: windows-latest, shell: pwsh, args: --github }
+          # Git Bash present, but the commands run with Claude Code's PowerShell tool (on by default
+          # on Windows), started from PowerShell.
+          - { name: "windows, PowerShell", os: windows-latest, shell: pwsh, args: --github --powershell-tool }
           # Git Bash hidden from Claude Code: it runs hooks and commands with PowerShell (and
           # without git, nothing is installed from GitHub).
           - { name: "windows, PowerShell, no Git Bash", os: windows-latest, shell: pwsh, args: --no-git-bash, hide-git: true }

@@ -36,12 +36,15 @@ export function commandFor(body) {
   return commands[0];
 }
 
-function toolName(body) {
+// The shell tool to call: Bash, unless `prefer` names another one Claude Code offers (on Windows
+// with Git Bash, Claude Code offers both, and a model may pick PowerShell).
+function toolName(body, prefer) {
   const names = (Array.isArray(body.tools) ? body.tools : []).map(t => t && t.name);
+  if (prefer && names.includes(prefer)) return prefer;
   return names.includes('Bash') ? 'Bash' : names.includes('PowerShell') ? 'PowerShell' : null;
 }
 
-export function startMockApi({ port = 0, log = () => {} } = {}) {
+export function startMockApi({ port = 0, log = () => {}, prefer = null } = {}) {
   let n = 0;
   const calls = [];
   const server = http.createServer((req, res) => {
@@ -58,17 +61,17 @@ export function startMockApi({ port = 0, log = () => {} } = {}) {
       let body = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { /* empty */ }
       const id = ++n;
-      const tool = toolName(body);
+      const tool = toolName(body, prefer);
       const command = tool ? commandFor(body) : null;
       const turns = (body.messages || []).filter(m => m && (m.role === 'user' || m.role === 'assistant'));
       const lastMsg = turns[turns.length - 1];
       const result = lastMsg && Array.isArray(lastMsg.content) ? lastMsg.content.find(b => b && b.type === 'tool_result') : null;
-      const call = { id, model: body.model, tools: (body.tools || []).map(t => t.name), tool, command, toolResult: result ? { isError: !!result.is_error, text: textOf(result.content) || (typeof result.content === 'string' ? result.content : '') } : null };
+      const call = { id, model: body.model, tools: (body.tools || []).map(t => t.name), shells: (body.tools || []).map(t => t.name).filter(n => n === 'Bash' || n === 'PowerShell'), tool, command, toolResult: result ? { isError: !!result.is_error, text: textOf(result.content) || (typeof result.content === 'string' ? result.content : '') } : null };
       calls.push(call);
       log(call);
       const model = body.model || 'claude-sonnet-4-5';
       const content = command
-        ? [{ type: 'tool_use', id: `toolu_e2e_${id}`, name: tool, input: tool === 'Bash' ? { command, description: 'Run the plugin command' } : { command, description: 'Run the plugin command' } }]
+        ? [{ type: 'tool_use', id: `toolu_e2e_${id}`, name: tool, input: { command, description: 'Run the plugin command' } }]
         : [{ type: 'text', text: result ? 'Done.' : 'ok' }];
       const stop = command ? 'tool_use' : 'end_turn';
       const message = { id: `msg_e2e_${id}`, type: 'message', role: 'assistant', model, content, stop_reason: stop, stop_sequence: null, usage: MOCK_USAGE };

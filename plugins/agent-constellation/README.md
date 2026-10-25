@@ -23,11 +23,11 @@ session (or open the lab and press **Connect Claude Code**).
 - `skills/remove-manual-hooks`: `/agent-constellation:remove-manual-hooks` takes out the hooks a
   manual `node constellation-relay.mjs setup` added, so events aren't sent twice.
 - These commands run only when you type them: Claude never runs them on its own, and no hook
-  opens a browser.
+  opens a browser. Each is pre-approved for Claude Code's Bash tool and, on Windows, its
+  PowerShell tool.
 
-Needs Node.js 18 or later as `node` on the PATH. Tested on macOS; Windows and Linux are expected
-to work but haven't been tested yet. Sessions in the cloud (Claude Code on the web)
-can't be shown. Remove with `/plugin uninstall agent-constellation` (run `/agent-constellation:telemetry off` first if
+Needs Node.js 18 or later as `node` on the PATH. Tested on macOS, Linux and Windows (Git Bash and
+PowerShell) in CI. Sessions in the cloud (Claude Code on the web) can't be shown. Remove with `/plugin uninstall agent-constellation` (run `/agent-constellation:telemetry off` first if
 you turned telemetry on).
 
 Full documentation: https://github.com/diegobianqui/agent-constellation

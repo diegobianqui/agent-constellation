@@ -1,5 +1,7 @@
 # Agent constellation for Claude Code
 
+[![test](https://github.com/diegobianqui/agent-constellation/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/diegobianqui/agent-constellation/actions/workflows/test.yml)
+
 A Claude Code plugin that shows your own Claude Code sessions in the
 [agent constellation lab](https://diegobianqui.com/lab/constellation): each session drawn as a
 constellation of its main agent, the subagents it starts and the tools they use, with token
@@ -8,8 +10,8 @@ counts per agent and per model.
 Only the shape of the activity leaves your computer's relay, and only to the lab page open in your
 own browser. Never prompts, replies, commands, file paths, tool inputs or outputs.
 
-Tested on macOS. Windows and Linux are expected to work but haven't been tested yet (see
-[Windows and Linux](#windows-and-linux)).
+Tested on macOS, Linux and Windows (Git Bash and PowerShell): CI runs the tests and an end-to-end
+test with Claude Code's CLI on each (see [Windows, Linux and macOS](#windows-linux-and-macos)).
 
 ## Install
 
@@ -123,7 +125,7 @@ hook events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUs
 PermissionRequest, Notification, SubagentStart, SubagentStop, Stop, StopFailure, PreCompact,
 PostCompact, TaskCreated, TaskCompleted and SessionEnd. Each one strips the hook payload and posts
 what is left to a relay on `127.0.0.1:4318`. (On Windows, a hook that starts the relay may take up
-to 6 seconds; see [Windows and Linux](#windows-and-linux).)
+to 6 seconds; see [Windows, Linux and macOS](#windows-linux-and-macos).)
 
 On SessionStart and UserPromptSubmit, if nothing listens on port 4318, the hook starts the relay
 in the background (detached from Claude Code, nothing attached to its input or output). One relay
@@ -258,10 +260,46 @@ lsof -nP -iTCP:4318 -sTCP:LISTEN
 kill <PID>
 ```
 
-## Windows and Linux
+## Windows, Linux and macOS
 
-The plugin is tested on macOS. On Windows and Linux it is expected to work, but it hasn't been
-tested there yet. What it relies on:
+[CI](https://github.com/diegobianqui/agent-constellation/actions/workflows/test.yml) runs on every
+push and pull request, on GitHub's Ubuntu, macOS and Windows runners:
+
+- `npm test`, with Node.js 18 and 22.
+- An end-to-end test, `e2e/e2e.mjs`, with Claude Code's own CLI from npm (the version in
+  `package.json`) and Node.js 22, in a temp `HOME` and `CLAUDE_CONFIG_DIR`, with no account and no
+  model: a dummy API key, and Claude Code pointed at a closed port or at a stand-in for the Claude
+  API (`e2e/mock-api.mjs`) that runs the plugin's commands as a model would. It installs the plugin
+  (from the checkout, and from GitHub), runs `claude plugin validate --strict`, and runs real
+  `claude -p` sessions. It checks that the hooks fire and start the relay on port 4318 in plugin
+  mode, in the background, and that it keeps running after the session ends; that only
+  `https://diegobianqui.com` and `https://www.diegobianqui.com` can read it (other origins and no
+  origin: 403); that no text from the prompt reaches the stream; that the token numbers of the
+  session's model calls come out of its own transcript; that `/agent-constellation:open`,
+  `/agent-constellation:telemetry` (alone, `on`, `off`) and `/agent-constellation:remove-manual-hooks`
+  run their command with no permission prompt; that hooks added by `setup` fire next to the
+  plugin's and their copies are dropped; that `scripts/open-lab.mjs` starts the relay or finds it
+  and opens the lab's address; and the desktop install message's command (no `claude`: the one-line
+  error; with `claude`: installs, and a second time says "already installed").
+- On Windows, three ways: started from Git Bash; started from PowerShell, with the commands run by
+  Claude Code's PowerShell tool (on by default on Windows, next to the Bash tool); and with Git for
+  Windows hidden, where Claude Code runs the hooks and the commands with PowerShell. All of the
+  above passes in each, and `start` opens the runner's default browser at the lab's address (the
+  test points it at a local page and sees the browser ask for it, `&` and all). The desktop install
+  message is a POSIX shell command, so it needs Git Bash: without it, use the two `claude plugin`
+  commands.
+- Linux also in Docker on your own computer: `e2e/docker/linux.sh` runs `npm test` and the
+  end-to-end test on Debian with Node.js 18 or 22, on arm64 or x64 (see [Tests](#tests)).
+
+What CI can't show: the Claude desktop app on Windows and Linux (its local sessions use the same
+settings and plugins as the CLI, but they aren't tested); a real browser on the lab page, which
+asks before a public page reaches `127.0.0.1` (Chrome's local network access prompt) and then
+connects; that no window shows when the relay starts on a Windows desktop (it is started hidden,
+with `windowsHide`); `xdg-open` and `open` opening a real browser on a Linux or macOS desktop (the
+test stubs them and checks what they are given); and WSL. Report what you find at
+https://github.com/diegobianqui/agent-constellation/issues.
+
+What the plugin relies on there:
 
 - The hooks run `node "<plugin folder>/relay/constellation-relay.mjs" hook …`, which works the same
   in `sh`, Git Bash and PowerShell (the shells Claude Code runs hooks with). Node.js 18 or newer
@@ -273,13 +311,14 @@ tested there yet. What it relies on:
   `xdg-open` (Linux). Where none works (for example WSL without a browser bridge), it says so and
   prints the address to open yourself.
 - The plugin's commands (`/agent-constellation:open`, `:telemetry`, `:remove-manual-hooks`) run
-  one `node` command with Claude Code's Bash tool. On Windows, that tool needs
-  [Git for Windows](https://git-scm.com/downloads/win); without it, Claude Code runs commands in
-  PowerShell, and these commands haven't been tried there.
+  one `node` command with Claude Code's Bash tool or, on Windows, its PowerShell tool: the command
+  is the same in both, and each is pre-approved for both.
+- The hooks `setup` adds (without the plugin) start with Node's absolute path on macOS and Linux,
+  and with `node` on Windows (relay 1.5.1 and later), so they run in PowerShell too. Ran setup on
+  Windows with an older relay? Run it again: it updates them.
 - Transcripts are found where Claude Code keeps them (`~/.claude/projects`, or
-  `$CLAUDE_CONFIG_DIR/projects`); Windows paths are handled, and covered by the tests.
-
-Report what you find at https://github.com/diegobianqui/agent-constellation/issues.
+  `$CLAUDE_CONFIG_DIR/projects`), with Windows paths too. The relay never reads a transcript
+  through a symbolic link, on Windows too (relay 1.5.1 and later).
 
 ## Remove
 
@@ -319,6 +358,21 @@ npm test
 Runs the relay on free ports other than 4318, with `HOME` and `CLAUDE_CONFIG_DIR` in a temp folder,
 and setup on temp settings files only. `claude plugin validate --strict .` and
 `claude plugin validate --strict plugins/agent-constellation` check the manifests.
+
+The end-to-end test needs port 4318 free (it starts the plugin's relay there, as a session does),
+so run it in a container or on a CI runner rather than next to a relay you use. On Linux in Docker,
+with nothing from your own `~/.claude` (the container has its own network, so its port 4318 isn't
+yours, and it is removed when it ends):
+
+```
+e2e/docker/linux.sh                                  # node:22-bookworm-slim, this computer's arch
+e2e/docker/linux.sh node:18-bookworm-slim            # Node.js 18
+e2e/docker/linux.sh node:22-bookworm-slim linux/amd64
+E2E_ARGS=--github e2e/docker/linux.sh                # also install from GitHub
+```
+
+Elsewhere, with Claude Code's CLI on the PATH: `node e2e/e2e.mjs` (it refuses to run while
+anything listens on port 4318).
 
 ## License
 

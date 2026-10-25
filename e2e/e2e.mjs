@@ -9,7 +9,9 @@
 //
 // --github       also install from github.com/diegobianqui/agent-constellation (what users get)
 // --no-git-bash  Windows only: hide Git Bash from Claude Code (PATH without Git, no
-//                CLAUDE_CODE_GIT_BASH_PATH), so it runs hooks and commands with PowerShell
+//                CLAUDE_CODE_GIT_BASH_PATH; CI also renames C:\Program Files\Git), so it runs hooks
+//                and commands with PowerShell
+// --powershell-tool  run the plugin's commands with the PowerShell tool when Claude Code offers it
 //
 // It needs port 4318 free (the plugin's hooks start their relay there): it refuses to run when
 // anything listens on it, so it never touches a relay you are running. Everything else lives in a
@@ -36,6 +38,9 @@ const WIN = process.platform === 'win32';
 const args = process.argv.slice(2);
 const GITHUB = args.includes('--github');
 const NO_GIT_BASH = args.includes('--no-git-bash');
+// --powershell-tool: the stand-in model runs the commands with the PowerShell tool whenever Claude
+// Code offers it (on Windows it does even with Git Bash, and may prefer it).
+const PREFER_POWERSHELL = args.includes('--powershell-tool');
 const REPORT = args.includes('--report') ? args[args.indexOf('--report') + 1] : process.env.E2E_REPORT;
 const SECRET = 'PROMPT-SECRET-e2e-7f3a';
 const RELAY_VERSION = (/const VERSION = '([^']+)'/.exec(fs.readFileSync(RELAY_FILE, 'utf8')) || [])[1];
@@ -278,7 +283,7 @@ async function main() {
   // 4 and 5. The plugin's commands, run by Claude Code through its shell tool, as a model would
   // (the stand-in API copies the command out of the skill). Token numbers from the transcript.
   step('commands through Claude Code (stand-in API)');
-  const mock = await startMockApi({ log: c => console.log(`  api #${c.id}: offered ${c.tool || 'no shell tool'}${c.command ? `, runs: ${c.command}` : ''}${c.toolResult ? `, result${c.toolResult.isError ? ' (error)' : ''}: ${c.toolResult.text.split('\n')[0].slice(0, 160)}` : ''}`) });
+  const mock = await startMockApi({ prefer: PREFER_POWERSHELL ? 'PowerShell' : null, log: c => console.log(`  api #${c.id}: shell tools offered: ${c.shells.join(', ') || 'none'}${c.tool ? `; calls ${c.tool}` : ''}${c.command ? `, runs: ${c.command}` : ''}${c.toolResult ? `, result${c.toolResult.isError ? ' (error)' : ''}: ${c.toolResult.text.split('\n')[0].slice(0, 160)}` : ''}`) });
   const browser = await new Promise(resolve => {
     // Windows: the page the browser should open (the lab URL pointed here, with an & in it).
     const hits = [];
@@ -437,8 +442,9 @@ async function main() {
 
   step('summary');
   const shellTools = [...new Set(toolRuns.filter(Boolean))];
-  console.log(`Claude Code's shell tool here: ${shellTools.join(', ') || 'none'}`);
-  results.push({ step: 'summary', name: 'shell tool', ok: true, info: true, detail: shellTools.join(', ') });
+  const offered = [...new Set(mock.calls.flatMap(c => c.shells))];
+  console.log(`Shell tools Claude Code offered: ${offered.join(', ') || 'none'}; the commands ran with: ${shellTools.join(', ') || 'none'}`);
+  results.push({ step: 'summary', name: `shell tools offered: ${offered.join(', ') || 'none'}; commands ran with: ${shellTools.join(', ') || 'none'}`, ok: true, info: true, detail: '' });
 }
 
 let crashed = null;
@@ -446,11 +452,11 @@ try { await main(); } catch (err) { crashed = err; check('the test itself ran to
 try { await stopRelays(); } catch { /* best effort */ }
 const failed = results.filter(r => !r.ok && !r.info);
 console.log(`\n${results.filter(r => r.ok && !r.info).length} passed, ${failed.length} failed, ${results.filter(r => r.info).length} info`);
-const meta = { platform: process.platform, arch: process.arch, node: process.version, gitBash: WIN ? !NO_GIT_BASH : null, plugin: PLUGIN_VERSION, relay: RELAY_VERSION };
+const meta = { platform: process.platform, arch: process.arch, node: process.version, gitBash: WIN ? !NO_GIT_BASH : null, powershellTool: PREFER_POWERSHELL, plugin: PLUGIN_VERSION, relay: RELAY_VERSION };
 if (REPORT) fs.writeFileSync(REPORT, JSON.stringify({ ...meta, results }, null, 2));
 if (process.env.GITHUB_STEP_SUMMARY) {
   const rows = results.map(r => `| ${r.ok ? (r.info ? 'info' : 'pass') : r.info ? 'info' : '**FAIL**'} | ${r.step} | ${r.name.replace(/\|/g, '\\|')} | ${r.ok && !r.info ? '' : r.detail.split('\n')[0].replace(/\|/g, '\\|').slice(0, 200)} |`);
-  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### e2e: ${meta.platform} ${meta.arch}, node ${meta.node}${WIN ? `, Git Bash ${NO_GIT_BASH ? 'hidden' : 'present'}` : ''}\n\n| | step | check | detail |\n|---|---|---|---|\n${rows.join('\n')}\n\n`);
+  fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `### e2e: ${meta.platform} ${meta.arch}, node ${meta.node}${WIN ? `, Git Bash ${NO_GIT_BASH ? 'hidden' : 'present'}` : ''}${PREFER_POWERSHELL ? ', PowerShell tool' : ''}\n\n| | step | check | detail |\n|---|---|---|---|\n${rows.join('\n')}\n\n`);
 }
 try { fs.rmSync(TMP, { recursive: true, force: true }); } catch { /* Windows may hold a file a moment longer */ }
 process.exit(failed.length || crashed ? 1 : 0);
