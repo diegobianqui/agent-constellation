@@ -12,8 +12,9 @@ session (or open the lab and press **Connect Claude Code**).
   project folder's name and the session title), never prompts, replies, commands, paths, tool
   inputs or outputs. Token counts come from the session transcripts on your computer: only the
   numbers are kept. It stops by itself after 30 minutes unused.
-- No pairing code: only `https://diegobianqui.com` (exact origin) may read the relay. Programs on
-  your computer could read it, as they could read the transcripts themselves.
+- No pairing code (also for a relay started by hand, from relay 1.5): only
+  `https://diegobianqui.com` (exact origin) may read the relay. Programs on your computer could
+  read it, as they could read the transcripts themselves.
 - `skills/open`: `/agent-constellation:open` starts the relay if none runs and opens the lab in
   your browser, connected (`scripts/open-lab.mjs`).
 - `skills/telemetry`: `/agent-constellation:telemetry on` (or `off`) adds (or takes out) Claude
@@ -24,7 +25,8 @@ session (or open the lab and press **Connect Claude Code**).
 - These commands run only when you type them: Claude never runs them on its own, and no hook
   opens a browser.
 
-Needs Node.js 18 or later as `node` on the PATH. Sessions in the cloud (Claude Code on the web)
+Needs Node.js 18 or later as `node` on the PATH. Tested on macOS; Windows and Linux are expected
+to work but haven't been tested yet. Sessions in the cloud (Claude Code on the web)
 can't be shown. Remove with `/plugin uninstall agent-constellation` (run `/agent-constellation:telemetry off` first if
 you turned telemetry on).
 

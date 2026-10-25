@@ -14,8 +14,9 @@ const DEFAULT_PORT = 4318;
 /** The command that opens a URL in the default browser on this platform. */
 export function opener(platform, url) {
   if (platform === 'darwin') return { command: 'open', args: [url], options: {} };
-  // "start" is built into cmd; its first quoted argument is a window title, hence the "".
-  if (platform === 'win32') return { command: 'cmd', args: ['/c', 'start', '""', url], options: { windowsVerbatimArguments: true, windowsHide: true } };
+  // "start" is built into cmd; its first quoted argument is a window title, hence the "". The URL
+  // is quoted too, so cmd doesn't read an & in it as the start of another command.
+  if (platform === 'win32') return { command: 'cmd', args: ['/c', 'start', '""', `"${url.replace(/"/g, '%22')}"`], options: { windowsVerbatimArguments: true, windowsHide: true } };
   return { command: 'xdg-open', args: [url], options: {} };
 }
 
@@ -40,7 +41,8 @@ export function summary(url, opened, relay, port) {
   const where = `port ${port}`;
   const v = relay.version ? ` ${relay.version}` : '';
   const state = relay.state === 'plugin' ? (relay.started ? `started the plugin's relay${v} on ${where}` : `the plugin's relay${v} is running on ${where}`)
-    : relay.state === 'manual' ? `a relay started by hand${relay.version ? ` (version ${relay.version})` : ''} holds ${where}: the page will ask for its pairing code, or say how to stop it`
+    : relay.state === 'manual' ? `a relay started by hand${v ? ` (version ${relay.version})` : ''} is running on ${where}`
+    : relay.state === 'old' ? `an older relay started by hand (version ${relay.version || '1.2 or earlier'}) holds ${where}: the page will say how to stop it`
     : relay.state === 'other' ? `something other than the relay holds ${where}: the page will say no relay answers`
     : `the relay did not start on ${where} (it needs Node.js 18 or later)`;
   return opened.ok

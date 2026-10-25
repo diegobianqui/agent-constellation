@@ -101,5 +101,5 @@ test('install: no Claude Code command anywhere, one plain line and exit 1', () =
   const box = sandbox('no-claude', { desktopCopy: false });
   const r = run(commandOf(install), box, `${box.bin}:/usr/bin:/bin`);
   assert.equal(r.code, 1);
-  assert.equal(r.out, "Claude Code's command wasn't found on this computer.");
+  assert.equal(r.out, "Claude Code's command wasn't found on this computer: install Claude Code for the terminal (code.claude.com/docs/en/setup), then send this message again.");
 });

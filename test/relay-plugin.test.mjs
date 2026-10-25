@@ -1,4 +1,5 @@
-// Tests for what the plugin adds to the relay: plugin mode (no pairing code), starting it from a
+// Tests for what the plugin adds to the relay: plugin mode, who may read the relay (no pairing code,
+// in either mode), starting it from a
 // hook, idle exit, and token numbers read from transcripts.
 //   node --test test/
 // Never touches your real Claude Code configuration: HOME and CLAUDE_CONFIG_DIR point at a temp
@@ -122,7 +123,7 @@ test('hooks.json: the 16 events, async, through the forwarder; --start where a s
 test('plugin mode: the lab origins read it without a code; nothing else reads it', async () => {
   const r = await startPluginRelay();
   try {
-    assert.doesNotMatch(r.out, /Pairing code/);
+    assert.doesNotMatch(r.out.replace(/Claude Code/g, ''), /pairing|code\b/i);
     for (const origin of [PAGE, SITE, 'https://www.diegobianqui.com']) {
       for (const p of ['/health', '/sessions']) {
         const ok = await request(r.port, { path: p, headers: { origin } });
@@ -140,7 +141,7 @@ test('plugin mode: the lab origins read it without a code; nothing else reads it
     const h = JSON.parse((await request(r.port, { path: '/health', headers: { origin: SITE } })).body);
     assert.equal(h.ok, true);
     assert.equal(h.mode, 'plugin');
-    assert.equal(h.pairing, false);
+    assert.equal('pairing' in h, false);
 
     // Other pages, look-alike origins, and requests that don't say where they come from: nothing.
     for (const origin of ['https://evil.example', 'http://diegobianqui.com', 'https://diegobianqui.com.evil.example', 'https://evil.diegobianqui.com', 'null', 'http://localhost:3311', undefined]) {
@@ -176,16 +177,57 @@ test('plugin mode: the lab origins read it without a code; nothing else reads it
   } finally { r.stop(); }
 });
 
-test('the manual relay still asks for its pairing code', async () => {
+test('started by hand: no pairing code, the same exact origins as plugin mode, nothing else reads it', async () => {
   const port = await freePort();
-  const child = spawn(process.execPath, [RELAY, '--port', String(port), '--code', 'TESTCODE'], { env: ENV, stdio: ['ignore', 'pipe', 'pipe'] });
+  const OTHER_PAGE = 'http://localhost:3315';
+  // --code was the pairing code's flag until relay 1.4: it no longer means anything.
+  const child = spawn(process.execPath, [RELAY, '--port', String(port), '--origin', PAGE, '--code', 'TESTCODE'], { env: { ...ENV, CONSTELLATION_RELAY_ORIGINS: OTHER_PAGE }, stdio: ['ignore', 'pipe', 'pipe'] });
   children.add(child);
-  await new Promise(res => { let out = ''; child.stdout.on('data', d => { out += d; if (out.includes('Pairing code')) res(); }); });
+  let out = '';
+  await new Promise((res, rej) => {
+    child.stdout.on('data', d => { out += d; if (out.includes('Stop with Ctrl+C')) res(); });
+    child.on('exit', c => rej(new Error(`relay exited ${c}: ${out}`)));
+  });
   try {
-    assert.equal((await request(port, { path: '/health', headers: { origin: SITE } })).status, 401);
-    const ok = await request(port, { path: '/health', headers: { origin: SITE, authorization: 'Bearer TEST-CODE' } });
-    assert.equal(ok.status, 200);
-    assert.equal(JSON.parse(ok.body).pairing, true);
+    assert.doesNotMatch(out.replace(/Claude Code/g, ''), /pairing|paste|\bcode\b/i);
+    assert.match(out, /Open the lab and press "Connect Claude Code"/);
+    assert.match(out, new RegExp(`Also allowed to read the stream: ${PAGE}, ${OTHER_PAGE}`));
+    for (const origin of [SITE, 'https://www.diegobianqui.com', PAGE, OTHER_PAGE]) {
+      for (const p of ['/health', '/sessions']) {
+        const ok = await request(port, { path: p, headers: { origin } });
+        assert.equal(ok.status, 200, `${origin} ${p}`);
+        assert.equal(ok.headers['access-control-allow-origin'], origin);
+        assert.match(ok.headers.vary, /Origin/);
+      }
+      const pre = await request(port, { method: 'OPTIONS', path: '/events', headers: { origin, 'access-control-request-method': 'GET', 'access-control-request-private-network': 'true' } });
+      assert.equal(pre.status, 204);
+      assert.equal(pre.headers['access-control-allow-private-network'], 'true');
+      assert.equal(pre.headers['access-control-allow-headers'], undefined, 'no Authorization header to allow');
+    }
+    const h = JSON.parse((await request(port, { path: '/health', headers: { origin: SITE } })).body);
+    assert.equal(h.ok, true);
+    assert.equal(h.mode, 'manual');
+    assert.equal(h.version, '1.5.0');
+    assert.equal('pairing' in h, false);
+    // The stream answers the page with no Authorization header.
+    const s = await openStream(port, SITE);
+    s.close();
+    // An Authorization header changes nothing either way.
+    assert.equal((await request(port, { path: '/health', headers: { origin: SITE, authorization: 'Bearer TESTCODE' } })).status, 200);
+    assert.equal((await request(port, { path: '/health', headers: { authorization: 'Bearer TESTCODE' } })).status, 403);
+    // Other pages, look-alikes and requests without an Origin: refused, never readable.
+    for (const origin of ['https://evil.example', 'http://diegobianqui.com', 'https://diegobianqui.com.evil.example', 'null', 'http://localhost:3311', undefined]) {
+      for (const p of ['/health', '/events', '/sessions']) {
+        const res = await request(port, { path: p, headers: origin === undefined ? {} : { origin } });
+        assert.equal(res.status, 403, `${origin} ${p}`);
+        assert.equal(res.headers['access-control-allow-origin'], undefined, `${origin} ${p}`);
+        assert.ok(!res.body.includes('"ok"') && !res.body.includes('event:'), `${origin} ${p} body ${res.body}`);
+      }
+    }
+    // The other protections hold: no ingest from web pages, Host checked.
+    const body = JSON.stringify({ hook_event_name: 'Stop', session_id: 's1' });
+    assert.equal((await request(port, { method: 'POST', path: '/hook', headers: { origin: SITE, 'content-type': 'application/json' }, body })).status, 403);
+    assert.equal((await request(port, { path: '/health', headers: { origin: SITE, host: `rebind.attacker.test:${port}` } })).status, 421);
   } finally { child.kill('SIGTERM'); }
 });
 
@@ -516,7 +558,7 @@ test('telemetry per session: a session without it keeps its transcript usage; on
     const ids = all.map(u => u.request);
     assert.equal(new Set(ids).size, ids.length);
     const h = JSON.parse((await request(r.port, { path: '/health', headers: { origin: PAGE } })).body);
-    assert.equal(h.version, '1.4.0');
+    assert.equal(h.version, '1.5.0');
     assert.equal(h.counts.transcripts, 4);
     assert.equal(h.counts.transcriptsSkipped, 4);
   } finally { s.close(); r.stop(); }

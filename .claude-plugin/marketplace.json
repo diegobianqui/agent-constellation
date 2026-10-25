@@ -6,7 +6,7 @@
   },
   "metadata": {
     "description": "Watch your own Claude Code sessions as a 3D constellation in the lab at diegobianqui.com/lab/constellation. Only the shape of the activity leaves your computer's relay, never text.",
-    "version": "1.2.0"
+    "version": "1.3.0"
   },
   "plugins": [
     {

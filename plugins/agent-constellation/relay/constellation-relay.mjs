@@ -14,9 +14,8 @@
  *      ran, when, for how long, whether they failed, which model and how many tokens. Two names
  *      pass too, so you can tell your sessions apart: the project folder's name (never its
  *      path) and the session's title. Start it with --no-names to drop them as well.
- *   3. It streams that to the lab page open in your browser, and only to it: the page has to
- *      present the pairing code printed when the relay starts, and only the lab's own origin
- *      may read the stream.
+ *   3. It streams that to the lab page open in your browser, and only to it: only the lab's own
+ *      origin may read the stream (see "Who can read it" below).
  *   4. Token counts without telemetry: when a hook event names the session's transcript (the
  *      JSONL file Claude Code keeps on this computer), or "Scan sessions" on the page finds it,
  *      the relay reads the new lines of that file locally and keeps only numbers from them:
@@ -29,19 +28,26 @@
  * your browser, over your computer's loopback interface. The relay keeps the last events in
  * memory only (nothing on disk) and forgets them when you stop it.
  *
+ * Who can read it, however it was started (by hand or by the plugin): there is no pairing code.
+ * The page's requests (/health, /events, /sessions) are answered only when their Origin is exactly
+ * https://diegobianqui.com or https://www.diegobianqui.com (or one added with --origin), and only
+ * those get the CORS header that lets a page read the answer; a request without an Origin header
+ * is refused. So other websites can't read it. The relay listens on 127.0.0.1 only, refuses
+ * requests addressed to any other host name (DNS rebinding), and refuses events posted from a web
+ * page (a browser always sends Origin on a POST; Claude Code and the hooks never do). Programs
+ * running on this computer as you could read it, as they could already read the transcripts
+ * themselves.
+ *
  * Plugin mode (--plugin): the agent-constellation Claude Code plugin starts the relay this way
- * from its hooks, in the background, when no relay is running yet. There is no pairing code:
- * only the lab's own origin may read the stream (exact CORS match, and a request without an
- * Origin header is refused), so other websites can't read it. Programs running on this computer
- * as you could read it, as they could already read the transcripts themselves. It exits by
+ * from its hooks, in the background, when no relay is running yet. It is quiet, and it exits by
  * itself after 30 minutes with no hook events and no page connected.
  *
- * This file, as served at https://diegobianqui.com/relay/constellation-relay.mjs, is the source.
- * The plugin (github.com/diegobianqui/agent-constellation) ships a byte-for-byte copy of it,
- * updated with that repository's scripts/sync-relay.mjs.
+ * The copy the lab's site serves is the source. The plugin (github.com/diegobianqui/agent-constellation)
+ * ships a byte-for-byte copy of it, updated with that repository's scripts/sync-relay.mjs.
  *
  * Commands
- *   node constellation-relay.mjs                start the relay (prints a pairing code)
+ *   node constellation-relay.mjs                start the relay; then open the lab and press
+ *                                               Connect Claude Code
  *   node constellation-relay.mjs --no-names     the same, without project folder names and session titles
  *   node constellation-relay.mjs setup          point Claude Code at the relay (settings.json): telemetry and hooks
  *   node constellation-relay.mjs setup --no-hooks
@@ -72,8 +78,8 @@
  *                                          active), from the file names and times in
  *                                          ~/.claude/projects. Afterwards the relay reads those
  *                                          sessions' token numbers, as in 4, and streams them.
- *   The page's requests need "Authorization: Bearer <pairing code>" (in plugin mode: an allowed
- *   Origin instead).
+ *   The page's requests need an allowed Origin (exact match), in both modes. Nothing else: no
+ *   pairing code.
  */
 
 import http from 'node:http';
@@ -81,17 +87,16 @@ import zlib from 'node:zlib';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '1.4.0';
+const VERSION = '1.5.0';
 const SELF = fileURLToPath(import.meta.url);
 const DEFAULT_PORT = 4318;
-// For tests only: the plugin's hooks use this port, and pass these extra page origins to the
-// relay they start (comma-separated), when set in the environment Claude Code runs in.
-const ENV_PORT = 'CONSTELLATION_RELAY_PORT';
-const ENV_ORIGINS = 'CONSTELLATION_RELAY_ORIGINS';
+// For tests only, from the environment (read by these literal names, nowhere else):
+// CONSTELLATION_RELAY_PORT, the port the plugin's hooks use, and CONSTELLATION_RELAY_ORIGINS,
+// more page origins the relay (however it starts) lets read it (comma-separated).
+const envOrigins = () => String(process.env.CONSTELLATION_RELAY_ORIGINS || '').split(',').map(s => s.trim()).filter(Boolean);
 
 // The only web pages allowed to read the stream. Add one with --origin (for local development).
 const SITE_ORIGINS = ['https://diegobianqui.com', 'https://www.diegobianqui.com'];
@@ -128,7 +133,7 @@ function opts(name) {
 }
 function portArg() {
   // CONSTELLATION_RELAY_PORT: for tests only, as for the plugin's hooks.
-  const raw = opt('--port') ?? (process.env[ENV_PORT] || String(DEFAULT_PORT));
+  const raw = opt('--port') ?? (process.env.CONSTELLATION_RELAY_PORT || String(DEFAULT_PORT));
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 1 || n > 65535) fail(`--port must be a number from 1 to 65535 (got ${raw}).`);
   return n;
@@ -143,9 +148,10 @@ Constellation relay ${VERSION}: watch your own Claude Code sessions in
 https://diegobianqui.com/lab/constellation. Runs on this computer only.
 
   node constellation-relay.mjs [--port 4318] [--origin <url>] [--no-names]
-      Start the relay. It prints a pairing code: open the lab, click "Connect Claude Code"
-      (or Connections, then Claude Code) and paste it. Then start a new Claude Code session.
-      --origin adds a web page allowed to read the stream (e.g. a local copy of the site).
+      Start the relay. Then open the lab and press "Connect Claude Code", and start a new
+      Claude Code session. Only the lab's own page may read the relay: no pairing code.
+      --origin adds a web page allowed to read the stream (e.g. a local copy of the site);
+      CONSTELLATION_RELAY_ORIGINS=<url>[,<url>] in the environment does the same.
       --no-names drops project folder names and session titles: the page shows short ids.
 
   node constellation-relay.mjs setup [options]
@@ -175,9 +181,9 @@ https://diegobianqui.com/lab/constellation. Runs on this computer only.
                 The relay uses it to drop the second copy when both are installed.
 
   node constellation-relay.mjs --plugin [--port 4318] [--origin <url>] [--no-names]
-      The relay as the plugin starts it: no pairing code (only the lab's own origin may read
-      the stream), quiet, and it exits by itself after 30 minutes with no hook events and no
-      page connected. If the port is taken, it exits without a word.
+      The relay as the plugin starts it: the same relay, quiet, and it exits by itself after
+      30 minutes with no hook events and no page connected. If the port is taken, it exits
+      without a word.
 
 What reaches the page: event names, ids, agent and tool names, timings, success flags, model
 names and token counts, and (unless --no-names) each session's project folder name and title.
@@ -520,25 +526,25 @@ const tokenCount = v => (Number.isInteger(v) && v >= 0 && v <= MAX_TOKENS ? v : 
  * The transcript a hook payload names, if it looks like one of Claude Code's: an absolute path to
  * "<session id>.jsonl" (or "agent-<agent id>.jsonl" in a "subagents" folder for a subagent's own
  * transcript) under a "projects" folder. Anything else is ignored, so a hook payload can't make
- * the relay read another file.
+ * the relay read another file. `P`: the path functions (the platform's; tests pass path.win32).
  */
-export function transcriptTargets(p) {
+export function transcriptTargets(p, P = path) {
   const out = [];
   if (!p || typeof p !== 'object') return out;
   const session = typeof p.session_id === 'string' && ID.test(p.session_id) ? p.session_id : null;
   const agent = typeof p.agent_id === 'string' && ID.test(p.agent_id) ? p.agent_id : null;
   if (!session) return out;
-  const ok = f => typeof f === 'string' && f.length < 4096 && path.isAbsolute(f) && !f.includes('\0') &&
-    path.normalize(f).split(path.sep).includes('projects');
+  const ok = f => typeof f === 'string' && f.length < 4096 && P.isAbsolute(f) && !f.includes('\0') &&
+    P.normalize(f).split(P.sep).includes('projects');
   const main = p.transcript_path;
-  if (ok(main) && path.basename(main) === `${session}.jsonl`) {
-    out.push({ file: path.normalize(main), session });
+  if (ok(main) && P.basename(main) === `${session}.jsonl`) {
+    out.push({ file: P.normalize(main), session });
     // A hook that fired inside a subagent: that subagent's own transcript, next to the session's.
-    if (agent) out.push({ file: path.join(path.dirname(path.normalize(main)), session, 'subagents', `agent-${agent}.jsonl`), session, agent });
+    if (agent) out.push({ file: P.join(P.dirname(P.normalize(main)), session, 'subagents', `agent-${agent}.jsonl`), session, agent });
   }
   const sub = p.agent_transcript_path;
-  if (agent && ok(sub) && path.basename(sub) === `agent-${agent}.jsonl` && !out.some(t => t.file === path.normalize(sub))) {
-    out.push({ file: path.normalize(sub), session, agent });
+  if (agent && ok(sub) && P.basename(sub) === `agent-${agent}.jsonl` && !out.some(t => t.file === P.normalize(sub))) {
+    out.push({ file: P.normalize(sub), session, agent });
   }
   return out;
 }
@@ -816,7 +822,7 @@ export function createTelemetrySessions({ now = () => Date.now() } = {}) {
 function startRelay() {
   const PORT = portArg();
   const NAMES = !flag('--no-names');
-  // Plugin mode: no pairing code (an allowed Origin instead), quiet, exits when idle.
+  // Plugin mode: quiet, and it exits when idle. Who may read it is the same in both modes.
   const PLUGIN = flag('--plugin');
   let idleMs = IDLE_MS;
   if (opt('--idle-seconds') !== undefined) {
@@ -829,33 +835,17 @@ function startRelay() {
   const ALLOWED_HOSTS = new Set([`127.0.0.1:${PORT}`, `localhost:${PORT}`, `[::1]:${PORT}`]);
 
   const origins = new Set(SITE_ORIGINS);
-  for (const o of opts('--origin')) {
+  // CONSTELLATION_RELAY_ORIGINS (comma-separated): the same as --origin, for local testing.
+  for (const o of [...opts('--origin'), ...envOrigins()]) {
     let u;
     try { u = new URL(o); } catch { fail(`--origin must be a web origin such as http://localhost:3000 (got ${o}).`); }
     if (!/^https?:$/.test(u.protocol)) fail(`--origin must start with http:// or https:// (got ${o}).`);
     origins.add(u.origin);
   }
 
-  // Pairing code: 8 characters from an alphabet without look-alikes (no 0/O, 1/I/L), shown as
-  // XXXX-XXXX. --code sets it, for automated tests only.
-  const ALPHABET = 'ABCDEFGHJKMNPQRSTUVWXYZ23456789';
-  const norm = s => String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
-  let code = norm(opt('--code'));
-  if (opt('--code') !== undefined && code.length < 8) fail('--code needs at least 8 letters or digits.');
-  if (!code) code = Array.from({ length: 8 }, () => ALPHABET[crypto.randomInt(ALPHABET.length)]).join('');
-  const shown = code.length === 8 ? `${code.slice(0, 4)}-${code.slice(4)}` : code;
-  const codeDigest = crypto.createHash('sha256').update(code).digest();
-
-  // Constant-time comparison of the bearer token with the code (hashing makes lengths equal).
-  // In plugin mode the page needs no code: an allowed Origin was already checked, and a request
-  // without one (an <img>, a script on this computer that doesn't say who it is) is refused.
-  function authorized(req) {
-    if (PLUGIN) return req.headers.origin !== undefined && origins.has(req.headers.origin);
-    const m = /^Bearer\s+(.+)$/i.exec(String(req.headers.authorization || ''));
-    if (!m) return false;
-    const given = crypto.createHash('sha256').update(norm(m[1])).digest();
-    return crypto.timingSafeEqual(given, codeDigest);
-  }
+  // The page's requests: an allowed Origin, exactly. A request without one (an <img>, a script
+  // on this computer that doesn't say who it is) is refused. No pairing code, in either mode.
+  const allowed = req => req.headers.origin !== undefined && origins.has(req.headers.origin);
 
   const buffer = [];
   const viewers = new Set();
@@ -1095,12 +1085,11 @@ function startRelay() {
         const origin = req.headers.origin;
         if (origin !== undefined && !origins.has(origin)) return send(res, 403, { error: 'This page is not allowed to read the relay' }, { Vary: 'Origin' });
         if (req.method === 'OPTIONS') {
-          // Preflight for the Authorization header. Allow-Private-Network answers Chrome's
-          // check before a public https page may reach this computer.
+          // Allow-Private-Network answers Chrome's preflight before a public https page may
+          // reach this computer.
           res.writeHead(204, {
             ...cors(req),
             'Access-Control-Allow-Methods': 'GET',
-            'Access-Control-Allow-Headers': 'authorization',
             'Access-Control-Allow-Private-Network': 'true',
             'Access-Control-Max-Age': '600',
             'Content-Length': 0,
@@ -1108,13 +1097,12 @@ function startRelay() {
           return res.end();
         }
         if (req.method !== 'GET') return send(res, 405, { error: 'GET only' }, { Allow: 'GET, OPTIONS', ...cors(req) });
-        if (PLUGIN && !authorized(req)) return send(res, 403, { error: 'Only the lab page can read this relay' }, { Vary: 'Origin' });
-        // The version and mode are no secret: they let the page say what is running here.
-        if (!authorized(req)) return send(res, 401, { error: 'Wrong pairing code', version: VERSION, mode: 'manual', pairing: true }, { 'WWW-Authenticate': 'Bearer', ...cors(req) });
+        if (!allowed(req)) return send(res, 403, { error: 'Only the lab page can read this relay' }, { Vary: 'Origin' });
         if (route === '/health') {
           const now = Date.now();
+          // The version and mode are no secret: they let the page say what is running here.
           return send(res, 200, {
-            ok: true, version: VERSION, mode: PLUGIN ? 'plugin' : 'manual', pairing: !PLUGIN, names: NAMES,
+            ok: true, version: VERSION, mode: PLUGIN ? 'plugin' : 'manual', names: NAMES,
             counts: { ...counts, viewers: viewers.size, buffered: buffer.length }, lastSeen: { ...lastSeen },
             hooksVia: { ...viaSeen },
             // Both the plugin's hooks and the ones setup added are sending: the page says how to
@@ -1160,21 +1148,19 @@ function startRelay() {
     const extra = [...origins].filter(o => !SITE_ORIGINS.includes(o));
     if (PLUGIN) {
       // Started by the plugin's hooks, in the background: one line, for whoever runs it by hand.
-      console.log(`Constellation relay ${VERSION} (plugin mode, no pairing code) on http://${HOST}:${PORT}; exits after ${Math.round(idleMs / 60000) || '<1'} min idle.`);
+      console.log(`Constellation relay ${VERSION} (plugin mode) on http://${HOST}:${PORT}; exits after ${Math.round(idleMs / 60000) || '<1'} min idle.`);
       return;
     }
     console.log(`
   Constellation relay ${VERSION} is running on http://${HOST}:${PORT} (this computer only)
 
-  Pairing code:  ${shown}
-
-  1. Open ${extra.length ? extra[0] : 'https://diegobianqui.com'}/lab/constellation
-  2. Click "Connect Claude Code" and paste the code.
+  1. Open the lab and press "Connect Claude Code":
+     ${extra.length ? extra[0] : 'https://diegobianqui.com'}/lab/constellation
      Your browser may ask to allow access to devices on your local network: allow it.
-  3. Start a new Claude Code session on this computer (terminal, IDE or desktop app).
+  2. Start a new Claude Code session on this computer (terminal, IDE or desktop app).
      Sessions that were open before you ran setup don't send anything until restarted.
 
-  Only the shape of the activity reaches the page. Nothing is sent to any server.
+  Only the lab's own page may read this relay. Nothing is sent to any server.
   ${NAMES ? 'Session names: the project folder name and the session title. To hide them, start with --no-names.' : 'Session names are off (--no-names): the page shows short session ids.'}
   Not set up yet? Run:  node constellation-relay.mjs setup${PORT === DEFAULT_PORT ? '' : ` --port ${PORT}`}
   Stop with Ctrl+C.${extra.length ? `\n  Also allowed to read the stream: ${extra.join(', ')}` : ''}
@@ -1301,6 +1287,12 @@ function telemetryEnv(base) {
 }
 
 /** Sets the telemetry variables that aren't set yet, recording each one. Returns the changes. */
+// Where an endpoint points, without anything else in its URL (a user name, a password, a path or
+// a query could hold a credential): only its host and port are ever shown.
+function hostOf(url) {
+  try { return new URL(url).host || 'another endpoint'; } catch { return 'another endpoint'; }
+}
+
 function addTelemetry(settings, mark, base) {
   const ENV = telemetryEnv(base);
   if (!isMap(settings.env)) { settings.env = {}; mark.createdEnv = true; }
@@ -1311,13 +1303,13 @@ function addTelemetry(settings, mark, base) {
   const ours = 'OTEL_EXPORTER_OTLP_ENDPOINT' in t.set && current === t.set.OTEL_EXPORTER_OTLP_ENDPOINT;
   const consented = 'OTEL_EXPORTER_OTLP_ENDPOINT' in t.replaced;
   if (current && current.replace(/\/$/, '') !== base && !flag('--force') && !ours && !consented) {
-    fail(`Your settings already send telemetry to ${current}.\n` +
+    fail(`Your settings already send telemetry to ${hostOf(current)}.\n` +
       'Claude Code sends OpenTelemetry to one endpoint, so pointing it at the relay would stop that.\n' +
       'Run again with --force to switch it anyway (setup --remove puts it back), or with --no-telemetry\n' +
       'to add only the hooks. Nothing was changed.');
   }
   for (const k of ['OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT']) {
-    if (env[k]) console.warn(`Note: your settings set ${k}=${env[k]}, which takes priority over the relay for that signal.`);
+    if (env[k]) console.warn(`Note: your settings set ${k}, which takes priority over the relay for that signal.`);
   }
   const changes = [];
   for (const [k, v] of Object.entries(ENV)) {
@@ -1337,11 +1329,24 @@ function addTelemetry(settings, mark, base) {
     changes.push(`env ${k}=${v}`);
   }
   mark.telemetry = t;
-  // Shell variables can take priority over settings for sessions started from that shell.
-  for (const k of [...Object.keys(ENV), 'OTEL_EXPORTER_OTLP_TRACES_ENDPOINT', 'OTEL_EXPORTER_OTLP_LOGS_ENDPOINT', 'OTEL_METRICS_EXPORTER']) {
-    const shell = process.env[k];
-    if (shell !== undefined && shell !== ENV[k] && !(k === 'OTEL_EXPORTER_OTLP_ENDPOINT' && shell.replace(/\/$/, '') === base)) {
-      console.warn(`Note: your shell exports ${k}=${shell}. Sessions started from this shell may use it instead.`);
+  // Shell variables can take priority over settings for sessions started from that shell. Each
+  // is read by its literal name, and only its name is shown, never its value.
+  const shell = {
+    CLAUDE_CODE_ENABLE_TELEMETRY: process.env.CLAUDE_CODE_ENABLE_TELEMETRY,
+    CLAUDE_CODE_ENHANCED_TELEMETRY_BETA: process.env.CLAUDE_CODE_ENHANCED_TELEMETRY_BETA,
+    OTEL_TRACES_EXPORTER: process.env.OTEL_TRACES_EXPORTER,
+    OTEL_LOGS_EXPORTER: process.env.OTEL_LOGS_EXPORTER,
+    OTEL_EXPORTER_OTLP_PROTOCOL: process.env.OTEL_EXPORTER_OTLP_PROTOCOL,
+    OTEL_EXPORTER_OTLP_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_ENDPOINT,
+    OTEL_TRACES_EXPORT_INTERVAL: process.env.OTEL_TRACES_EXPORT_INTERVAL,
+    OTEL_LOGS_EXPORT_INTERVAL: process.env.OTEL_LOGS_EXPORT_INTERVAL,
+    OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT,
+    OTEL_EXPORTER_OTLP_LOGS_ENDPOINT: process.env.OTEL_EXPORTER_OTLP_LOGS_ENDPOINT,
+    OTEL_METRICS_EXPORTER: process.env.OTEL_METRICS_EXPORTER,
+  };
+  for (const [k, v] of Object.entries(shell)) {
+    if (v !== undefined && v !== ENV[k] && !(k === 'OTEL_EXPORTER_OTLP_ENDPOINT' && v.replace(/\/$/, '') === base)) {
+      console.warn(`Note: your shell exports ${k}. Sessions started from this shell may use it instead of the settings.`);
     }
   }
   return changes;
@@ -1428,9 +1433,10 @@ function backupAndWrite(file, obj) {
 }
 
 /**
- * What answers on the relay's port: "plugin" (the relay the plugin starts), "manual" (a relay
- * started by hand, which asks for its pairing code), "other" or "none". It asks /health as the lab
- * page would, which a relay answers with its version and mode and nothing else.
+ * What answers on the relay's port: "plugin" (the relay the plugin starts), "manual" (one started
+ * by hand), "old" (a relay before 1.5 started by hand, which answers the lab page only with a
+ * pairing code the page no longer asks for: it has to be stopped), "other" or "none". It asks
+ * /health as the lab page would, which a relay answers with its version and mode and nothing else.
  */
 export function probeRelay(port, timeout = 800) {
   return new Promise(resolve => {
@@ -1443,7 +1449,7 @@ export function probeRelay(port, timeout = 800) {
         try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { body = null; }
         const version = body && typeof body.version === 'string' && TOKEN.test(body.version) ? body.version : null;
         if (res.statusCode === 200 && body && body.ok === true) resolve({ state: body.mode === 'plugin' ? 'plugin' : 'manual', version });
-        else if (res.statusCode === 401) resolve({ state: 'manual', version });
+        else if (res.statusCode === 401) resolve({ state: 'old', version });
         else resolve({ state: 'other' });
       });
     });
@@ -1451,6 +1457,9 @@ export function probeRelay(port, timeout = 800) {
     req.on('error', err => resolve({ state: err && err.code === 'ECONNREFUSED' ? 'none' : 'other' }));
   });
 }
+
+// A relay before 1.5 started by hand: its version from 1.3 on (1.2 and earlier don't say).
+const olderRelay = found => `older relay started by hand (version ${found.version || '1.2 or earlier'})`;
 
 // The relay's part of setup's "Next" steps: nothing to start when a relay already answers, or
 // when the plugin starts one.
@@ -1460,6 +1469,9 @@ function relaySteps(found, port, { telemetry, fromPlugin }) {
   const portFlag = port === DEFAULT_PORT ? '' : ` --port ${port}`;
   if (found.state === 'plugin') return { note: `The plugin's relay${v} is running on port ${port}${to}.` };
   if (found.state === 'manual') return { note: `A relay started by hand${found.version ? ` (version ${found.version})` : ''} is running on port ${port}${to}.` };
+  if (found.state === 'old') {
+    return { note: `An ${olderRelay(found)} is running on port ${port}${to}.`, step: `The lab can't connect to it: stop it (lsof -nP -iTCP:${port} -sTCP:LISTEN shows its PID; then kill <PID>).` };
+  }
   if (found.state === 'other') {
     return { step: `Something other than the relay answers on port ${port}. Stop it, or use another port for both:\n` +
       `     node constellation-relay.mjs setup${telemetry ? '' : ' --no-telemetry'} --port <n>   and   node constellation-relay.mjs --port <n>` };
@@ -1520,7 +1532,8 @@ async function setup() {
 
   if (!changes.length) {
     console.log(`\nAlready set; nothing changed in ${SETTINGS}.`);
-    if (relay) console.log(relay.note || `Next: ${relay.step}`);
+    if (relay && relay.note) console.log(relay.note);
+    if (relay && relay.step) console.log(`Next: ${relay.step}`);
     console.log('');
     return;
   }
@@ -1570,12 +1583,13 @@ async function status() {
   const toRelay = on && endpoint.replace(/\/$/, '') === BASE;
   const telemetry = !on ? 'off'
     : toRelay ? `on, to the relay (${BASE})${mark && mark.telemetry ? '' : ', not set by setup'}`
-    : `on, to ${endpoint} (not the relay on port ${PORT})`;
+    : `on, to ${hostOf(endpoint)} (not the relay on port ${PORT})`;
   const hooks = countOurs(settings);
   const found = await probeRelay(PORT);
   const v = found.version ? `, version ${found.version}` : '';
   const relay = found.state === 'plugin' ? `the plugin's relay${v}`
-    : found.state === 'manual' ? `a relay started by hand${v || ' (version 1.2 or earlier)'}; it asks for its pairing code`
+    : found.state === 'manual' ? `a relay started by hand${v}`
+    : found.state === 'old' ? `an ${olderRelay(found)}; the lab can't connect to it: stop it (lsof -nP -iTCP:${PORT} -sTCP:LISTEN, then kill <PID>)`
     : found.state === 'other' ? 'something other than the relay'
     : 'nothing (the plugin starts its relay when a session starts)';
   console.log(`
@@ -1597,7 +1611,6 @@ Relay on port ${PORT}: ${relay}
 // output. If another one takes the port first, this one exits at once.
 function spawnPluginRelay(port) {
   const args = [SELF, '--plugin', '--port', String(port)];
-  for (const o of String(process.env[ENV_ORIGINS] || '').split(',').map(s => s.trim()).filter(Boolean)) args.push('--origin', o);
   let home;
   try { home = os.homedir(); } catch { home = undefined; }
   const child = spawn(process.execPath, args, { detached: true, stdio: 'ignore', cwd: home, windowsHide: true });
@@ -1608,7 +1621,7 @@ function spawnPluginRelay(port) {
 /**
  * Makes sure a relay answers on the port, as the plugin's hooks do: when nothing listens there,
  * starts one in plugin mode and waits until it answers (at most `wait` ms). Resolves to what
- * answers then ({ state: "plugin" | "manual" | "other" | "none", version, started }). Used by the
+ * answers then ({ state: "plugin" | "manual" | "old" | "other" | "none", version, started }). Used by the
  * plugin's /agent-constellation:open.
  */
 export async function ensureRelay({ port = DEFAULT_PORT, wait = 3000 } = {}) {
@@ -1627,23 +1640,32 @@ export async function ensureRelay({ port = DEFAULT_PORT, wait = 3000 } = {}) {
 // ---------------------------------------------------------------- hook: the forwarder
 
 // Claude Code runs this in the background for every hook event. It must never slow a session
-// down or change what it does: it prints nothing, gives up after about 2 seconds and always
-// exits 0, whether or not the relay is running.
+// down or change what it does: it prints nothing, gives up after about 2 seconds (see hookTimes)
+// and always exits 0, whether or not the relay is running.
 //
 // With --start (the plugin's hooks), a relay that isn't running is started first: in plugin
 // mode, detached from Claude Code, with nothing attached to its input or output. Only when
 // nothing at all accepts connections on the port: if another program holds it, nothing starts.
 // Two hooks starting one at the same moment are fine: the second relay finds the port taken and
 // exits.
+// How long the forwarder may take: about 2 seconds. On Windows, a connection to a port where
+// nothing listens is refused only after the system has retried for about 2 seconds, so a hook
+// with --start there waits longer before it gives up: otherwise it would never see the refusal
+// that tells it to start the relay. (The hooks run in the background: this never slows a session.)
+export function hookTimes(platform, start) {
+  return platform === 'win32' && start ? { total: 6000, request: 4500 } : { total: 2000, request: 1500 };
+}
+
 function hookForward() {
   const done = () => process.exit(0);
   process.on('uncaughtException', done);
   process.on('unhandledRejection', done);
   const startedAt = Date.now();
-  setTimeout(done, 2000).unref();
   const START = flag('--start');
+  const times = hookTimes(process.platform, START);
+  setTimeout(done, times.total).unref();
   let port = DEFAULT_PORT;
-  const envPort = Number(process.env[ENV_PORT]);
+  const envPort = Number(process.env.CONSTELLATION_RELAY_PORT);
   if (Number.isInteger(envPort) && envPort > 0 && envPort < 65536) port = envPort;
   // hook [--start] [--via plugin|settings] [<url>]
   let url;
@@ -1664,12 +1686,12 @@ function hookForward() {
 
   function post(body) {
     const req = http.request({
-      hostname: target.hostname.replace(/^\[|\]$/g, ''), port: target.port || 80, path: target.pathname, method: 'POST', timeout: 1500,
+      hostname: target.hostname.replace(/^\[|\]$/g, ''), port: target.port || 80, path: target.pathname, method: 'POST', timeout: times.request,
       headers: { 'Content-Type': 'application/json', 'Content-Length': body.length, 'X-Hook-Ts': String(startedAt) },
     }, res => { res.resume(); res.on('end', done); res.on('error', done); });
     req.on('timeout', () => { req.destroy(); done(); });
     req.on('error', err => {
-      // No relay: start one (once), then try again until it listens or the 2 s are up.
+      // No relay: start one (once), then try again until it listens or the time is up.
       if (START && err && err.code === 'ECONNREFUSED' && target.hostname === '127.0.0.1') {
         if (!started) startRelayInBackground();
         setTimeout(() => post(body), 100);
@@ -1709,8 +1731,13 @@ function hookForward() {
 
 // ---------------------------------------------------------------- main
 
+// Run as a program, not imported (the plugin's open script imports it). Windows paths compare
+// without regard to case or slashes (a hook may name the file as C:/Users/... or c:\Users\...).
 let isMain = false;
-try { isMain = !!process.argv[1] && fs.realpathSync(process.argv[1]) === fs.realpathSync(SELF); } catch { isMain = false; }
+try {
+  const same = (a, b) => (process.platform === 'win32' ? a.toLowerCase() === b.toLowerCase() : a === b);
+  isMain = !!process.argv[1] && same(fs.realpathSync(path.resolve(process.argv[1])), fs.realpathSync(SELF));
+} catch { isMain = false; }
 if (isMain) {
   if (flag('--help') || flag('-h') || command === 'help') console.log(HELP);
   else if (command === 'start') startRelay();

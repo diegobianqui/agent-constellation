@@ -8,6 +8,9 @@ counts per agent and per model.
 Only the shape of the activity leaves your computer's relay, and only to the lab page open in your
 own browser. Never prompts, replies, commands, file paths, tool inputs or outputs.
 
+Tested on macOS. Windows and Linux are expected to work but haven't been tested yet (see
+[Windows and Linux](#windows-and-linux)).
+
 ## Install
 
 **Claude Code in a terminal.** In a session:
@@ -21,21 +24,28 @@ own browser. Never prompts, replies, commands, file paths, tool inputs or output
 Choose a scope in the panel that opens (for you, on every project: "Install for you"). If the
 install summary already says the plugin is active, `/reload-plugins` changes nothing.
 
-**Desktop app (macOS).** Its plugin browser lists plugins only from marketplaces you already
-added, and a Mac with only the desktop app may have no `claude` command in Terminal: the app keeps
-its own copy of Claude Code's command under
-`~/Library/Application Support/Claude/claude-code/<version>/<hash>/claude.app/Contents/MacOS/claude`.
-So send this message in a Claude Code session in the desktop app. It carries one exact command,
-so Claude has nothing to look for: the command finds Claude Code's command (on the PATH or the
-desktop app's copy), checks for Node.js 18 or newer, adds the marketplace and installs the plugin.
-Running it twice is harmless ("already installed"). If Claude Code's command or Node.js is
-missing, it says so in one line.
+**Desktop app.** Its plugin browser lists plugins only from marketplaces you already added. So
+send this message in a Claude Code session in the desktop app. It carries one exact command, so
+Claude has nothing to look for: the command finds Claude Code's command, checks for Node.js 18 or
+newer, adds the marketplace and installs the plugin. Running it twice is harmless ("already
+installed"). If Claude Code's command or Node.js is missing, it says so in one line, with what to
+do.
+
+Claude Code's command is `claude` on the PATH. A Mac with only the desktop app may have no `claude`
+in Terminal: the app keeps its own copy under
+`~/Library/Application Support/Claude/claude-code/<version>/<hash>/claude.app/Contents/MacOS/claude`
+(seen on macOS, not documented), and the command uses it. On Windows and Linux there is no such
+fallback: without `claude` on the PATH, the message says to install Claude Code for the terminal
+(https://code.claude.com/docs/en/setup) and send it again. On Windows the command needs Claude
+Code's Bash tool, which needs [Git for Windows](https://git-scm.com/downloads/win) (without it,
+Claude Code runs commands in PowerShell, where this command doesn't run): otherwise use the two
+`claude plugin` commands below in a terminal.
 
 ````
 Install the agent-constellation plugin for Claude Code. Run this exact command once with Bash and nothing else (it finds Claude Code's own command even when `claude` isn't on the PATH; running it twice is harmless). Don't search for files or run other checks first. Reply with only the command's last line, then: "Start a new session, then run /agent-constellation:open." If the line is an error, show it and stop.
 
 ```
-C="$(command -v claude || ls -dt "$HOME/Library/Application Support/Claude/claude-code/"*/*/claude.app/Contents/MacOS/claude 2>/dev/null | head -1)"; [ -n "$C" ] || { echo "Claude Code's command wasn't found on this computer."; exit 1; }; node -e 'process.exit(parseInt(process.versions.node)<18?1:0)' 2>/dev/null || { echo "The plugin needs Node.js 18 or newer: nodejs.org"; exit 1; }; "$C" plugin marketplace add diegobianqui/agent-constellation >/dev/null && "$C" plugin install agent-constellation@agent-constellation 2>&1 | tail -1
+C="$(command -v claude || ls -dt "$HOME/Library/Application Support/Claude/claude-code/"*/*/claude.app/Contents/MacOS/claude 2>/dev/null | head -1)"; [ -n "$C" ] || { echo "Claude Code's command wasn't found on this computer: install Claude Code for the terminal (code.claude.com/docs/en/setup), then send this message again."; exit 1; }; node -e 'process.exit(parseInt(process.versions.node)<18?1:0)' 2>/dev/null || { echo "The plugin needs Node.js 18 or newer: nodejs.org"; exit 1; }; "$C" plugin marketplace add diegobianqui/agent-constellation >/dev/null && "$C" plugin install agent-constellation@agent-constellation 2>&1 | tail -1
 ```
 ````
 
@@ -53,7 +63,7 @@ With Claude Code 2.1.292 or later, one command does both:
 `claude plugin install agent-constellation --marketplace diegobianqui/agent-constellation`.
 The terminal, the desktop app's local sessions and the VS Code extension read the same settings,
 so the plugin then appears on the desktop app's Plugins page and is on in the local sessions you
-start next. On Windows, run these two commands in a terminal where `claude` works.
+start next. These two commands are the same on macOS, Windows and Linux.
 
 **VS Code.** Type `/plugins` in the Claude Code panel to open **Manage plugins**. On the
 **Marketplaces** tab, add `diegobianqui/agent-constellation`; on the **Plugins** tab, click
@@ -74,7 +84,8 @@ It starts the plugin's relay if none is running and opens
 https://diegobianqui.com/lab/constellation?connect=claude-code in your default browser (`open` on
 macOS, `xdg-open` on Linux, `start` on Windows); the page connects by itself. Or open the lab
 yourself, after a session started or sent a prompt, and press **Connect Claude Code**. No
-download, no settings to edit, no pairing code.
+download, no settings to edit, no pairing code. That button is the only place the page connects
+from; **Back to simulation** disconnects.
 
 Needs Node.js 18 or newer, as `node` on the PATH that Claude Code runs hooks with: check with
 `node -v`.
@@ -99,7 +110,7 @@ message with the update commands:
 Update the agent-constellation plugin for Claude Code. Run this exact command once with Bash and nothing else (it finds Claude Code's own command even when `claude` isn't on the PATH; running it twice is harmless). Don't search for files or run other checks first. Reply with only the command's last line, then: "Start a new session for the new version to load." If the line is an error, show it and stop.
 
 ```
-C="$(command -v claude || ls -dt "$HOME/Library/Application Support/Claude/claude-code/"*/*/claude.app/Contents/MacOS/claude 2>/dev/null | head -1)"; [ -n "$C" ] || { echo "Claude Code's command wasn't found on this computer."; exit 1; }; node -e 'process.exit(parseInt(process.versions.node)<18?1:0)' 2>/dev/null || { echo "The plugin needs Node.js 18 or newer: nodejs.org"; exit 1; }; "$C" plugin marketplace update agent-constellation >/dev/null && "$C" plugin update agent-constellation@agent-constellation 2>&1 | tail -1
+C="$(command -v claude || ls -dt "$HOME/Library/Application Support/Claude/claude-code/"*/*/claude.app/Contents/MacOS/claude 2>/dev/null | head -1)"; [ -n "$C" ] || { echo "Claude Code's command wasn't found on this computer: install Claude Code for the terminal (code.claude.com/docs/en/setup), then send this message again."; exit 1; }; node -e 'process.exit(parseInt(process.versions.node)<18?1:0)' 2>/dev/null || { echo "The plugin needs Node.js 18 or newer: nodejs.org"; exit 1; }; "$C" plugin marketplace update agent-constellation >/dev/null && "$C" plugin update agent-constellation@agent-constellation 2>&1 | tail -1
 ```
 ````
 
@@ -111,7 +122,8 @@ The plugin adds background hooks (`async`, silent, at most about 2 seconds, alwa
 hook events: SessionStart, UserPromptSubmit, PreToolUse, PostToolUse, PostToolUseFailure,
 PermissionRequest, Notification, SubagentStart, SubagentStop, Stop, StopFailure, PreCompact,
 PostCompact, TaskCreated, TaskCompleted and SessionEnd. Each one strips the hook payload and posts
-what is left to a relay on `127.0.0.1:4318`.
+what is left to a relay on `127.0.0.1:4318`. (On Windows, a hook that starts the relay may take up
+to 6 seconds; see [Windows and Linux](#windows-and-linux).)
 
 On SessionStart and UserPromptSubmit, if nothing listens on port 4318, the hook starts the relay
 in the background (detached from Claude Code, nothing attached to its input or output). One relay
@@ -165,7 +177,8 @@ be shown.
 
 ## Security: no pairing code
 
-The relay the plugin starts has no pairing code. What protects it instead:
+The relay has no pairing code, whether the plugin starts it or you start it by hand (relay 1.5 and
+later). What protects it instead:
 
 - It listens on `127.0.0.1` only: nothing on your network can reach it.
 - Its stream (`/events`, `/health`, `/sessions`) answers only requests whose `Origin` is exactly
@@ -179,8 +192,7 @@ The relay the plugin starts has no pairing code. What protects it instead:
 
 The trade-off: programs running on your computer as you can read the stream, since they can send
 any `Origin` they like. They could already read the transcripts themselves, which hold far more
-than the stream does. If you want a pairing code anyway, start the relay by hand (below): the
-plugin then posts to it and starts nothing.
+than the stream does.
 
 ## Advanced: telemetry (model calls, costs)
 
@@ -204,12 +216,14 @@ calls from before its telemetry started (a session that was running when you tur
 or a relay started later), and each call is counted once, by its request id. Sessions without
 telemetry keep their token counts from the transcripts, whatever other sessions do.
 
-Without the plugin, use the relay by hand, with a pairing code:
+## Without the plugin
+
+The relay also runs by hand, with the same protections and no pairing code:
 
 ```
 curl -fO https://diegobianqui.com/relay/constellation-relay.mjs
 node constellation-relay.mjs setup      # telemetry and hooks; a backup is saved first
-node constellation-relay.mjs            # prints the pairing code to paste in the lab
+node constellation-relay.mjs            # then open the lab and press Connect Claude Code
 ```
 
 `node constellation-relay.mjs setup --remove` undoes exactly what setup added (`--no-hooks`: only
@@ -232,16 +246,40 @@ never dropped. The lab page then says so, once; remove the manual hooks with:
 It takes out the hooks `setup` added and leaves the telemetry settings and your other hooks as
 they are.
 
-### A relay started by hand holds port 4318
+### An older relay holds port 4318
 
 The plugin starts nothing when another program listens on 4318: its hooks post to that program.
-A relay you started by hand (or an older one) asks for its pairing code, and the lab says which
-one it found. Paste its code, or stop it so the plugin can start its own:
+A relay from 1.5 on, started by hand, works with the lab as the plugin's does. An older one started
+by hand (1.4 or earlier) asks for a pairing code, which the lab no longer takes: the lab says it
+found one and how to stop it, so the plugin can start its own:
 
 ```
 lsof -nP -iTCP:4318 -sTCP:LISTEN
 kill <PID>
 ```
+
+## Windows and Linux
+
+The plugin is tested on macOS. On Windows and Linux it is expected to work, but it hasn't been
+tested there yet. What it relies on:
+
+- The hooks run `node "<plugin folder>/relay/constellation-relay.mjs" hook …`, which works the same
+  in `sh`, Git Bash and PowerShell (the shells Claude Code runs hooks with). Node.js 18 or newer
+  must be on the PATH Claude Code runs hooks with.
+- The relay starts in the background, detached and with no window (`windowsHide`). On Windows a
+  connection to a port where nothing listens is refused only after about 2 seconds, so a hook that
+  starts the relay waits up to 6 seconds there (in the background; sessions never wait for it).
+- `/agent-constellation:open` opens the browser with `open` (macOS), `start` (Windows) or
+  `xdg-open` (Linux). Where none works (for example WSL without a browser bridge), it says so and
+  prints the address to open yourself.
+- The plugin's commands (`/agent-constellation:open`, `:telemetry`, `:remove-manual-hooks`) run
+  one `node` command with Claude Code's Bash tool. On Windows, that tool needs
+  [Git for Windows](https://git-scm.com/downloads/win); without it, Claude Code runs commands in
+  PowerShell, and these commands haven't been tried there.
+- Transcripts are found where Claude Code keeps them (`~/.claude/projects`, or
+  `$CLAUDE_CONFIG_DIR/projects`); Windows paths are handled, and covered by the tests.
+
+Report what you find at https://github.com/diegobianqui/agent-constellation/issues.
 
 ## Remove
 
