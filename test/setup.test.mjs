@@ -250,7 +250,7 @@ test('setup output: no "Start the relay" when one answers, no hooks line without
     const s = settingsFile('out-plugin', {});
     const r = await run(['setup', '--no-hooks', '--plugin', '--settings', s.f, '--port', String(p.port)]);
     assert.equal(r.code, 0, r.err);
-    assert.match(r.out, new RegExp(`The plugin's relay 1\\.3\\.0 is running on port ${p.port}: telemetry goes to it\\.`));
+    assert.match(r.out, new RegExp(`The plugin's relay 1\\.4\\.0 is running on port ${p.port}: telemetry goes to it\\.`));
     assert.doesNotMatch(r.out, /Start the relay/);
     assert.doesNotMatch(r.out, /hooks run this file/);
     assert.match(r.out, /1\. Start a new Claude Code session/);
@@ -258,14 +258,14 @@ test('setup output: no "Start the relay" when one answers, no hooks line without
     // The same from the downloaded file, without --plugin.
     const d = settingsFile('out-plugin-cli', {});
     const r2 = await run(['setup', '--no-hooks', '--settings', d.f, '--port', String(p.port)]);
-    assert.match(r2.out, /The plugin's relay 1\.3\.0 is running/);
+    assert.match(r2.out, /The plugin's relay 1\.4\.0 is running/);
     assert.doesNotMatch(r2.out, /Start the relay|hooks run this file/);
     assert.match(r2.out, /To undo: {2}node constellation-relay\.mjs setup --remove --no-hooks/);
     // Status says what runs there.
     const st = await run(['status', '--plugin', '--settings', s.f, '--port', String(p.port)]);
     assert.match(st.out, /Telemetry: +on, to the relay/);
     assert.match(st.out, /Hooks that setup added: none/);
-    assert.match(st.out, new RegExp(`Relay on port ${p.port}: the plugin's relay, version 1\\.3\\.0`));
+    assert.match(st.out, new RegExp(`Relay on port ${p.port}: the plugin's relay, version 1\\.4\\.0`));
   } finally { p.stop(); }
 
   // A relay started by hand answers.
@@ -273,12 +273,12 @@ test('setup output: no "Start the relay" when one answers, no hooks line without
   try {
     const s = settingsFile('out-manual', {});
     const r = await run(['setup', '--settings', s.f, '--port', String(m.port)]);
-    assert.match(r.out, /A relay started by hand \(version 1\.3\.0\) is running on port \d+: telemetry goes to it\./);
+    assert.match(r.out, /A relay started by hand \(version 1\.4\.0\) is running on port \d+: telemetry goes to it\./);
     assert.doesNotMatch(r.out, /Start the relay/);
     assert.match(r.out, /16 background hooks/);
     assert.match(r.out, /The hooks run this file from where it is now/);
     const st = await run(['status', '--settings', s.f, '--port', String(m.port)]);
-    assert.match(st.out, /a relay started by hand, version 1\.3\.0; it asks for its pairing code/);
+    assert.match(st.out, /a relay started by hand, version 1\.4\.0; it asks for its pairing code/);
     assert.match(st.out, /Hooks that setup added: 16/);
   } finally { m.stop(); }
 
@@ -313,7 +313,7 @@ test('a relay started by hand says its version and mode to a page without the co
     const res = await request(m.port, { path: '/health', headers: { origin: SITE } });
     assert.equal(res.status, 401);
     assert.equal(res.headers['access-control-allow-origin'], SITE);
-    assert.deepEqual(JSON.parse(res.body), { error: 'Wrong pairing code', version: '1.3.0', mode: 'manual', pairing: true });
+    assert.deepEqual(JSON.parse(res.body), { error: 'Wrong pairing code', version: '1.4.0', mode: 'manual', pairing: true });
     // Nothing else: no counts, no sessions, no stream without the code.
     assert.equal((await request(m.port, { path: '/sessions', headers: { origin: SITE } })).status, 401);
   } finally { m.stop(); }
@@ -476,8 +476,8 @@ test('open: the right opener per platform, through spawn (stubbed: nothing opens
   }
   assert.deepEqual(await openUrl(LAB_URL, { platform: 'linux', spawn: fake(false) }), { ok: false, command: 'xdg-open' });
 
-  assert.equal(summary(LAB_URL, { ok: true }, { state: 'plugin', version: '1.3.0', started: true }, 4318),
-    `Opened ${LAB_URL} in your browser; started the plugin's relay 1.3.0 on port 4318.`);
+  assert.equal(summary(LAB_URL, { ok: true }, { state: 'plugin', version: '1.4.0', started: true }, 4318),
+    `Opened ${LAB_URL} in your browser; started the plugin's relay 1.4.0 on port 4318.`);
   assert.match(summary(LAB_URL, { ok: true }, { state: 'manual', version: null }, 4318), /a relay started by hand holds port 4318: the page will ask for its pairing code/);
   assert.match(summary(LAB_URL, { ok: false, command: 'xdg-open' }, { state: 'none' }, 4318), /^Could not open a browser \(xdg-open\): open .* yourself; the relay did not start/);
 });
@@ -488,10 +488,10 @@ test('open: starts the relay when none runs, finds it when it does (browser not 
   const first = await run([], { relay: OPEN, env });
   assert.equal(first.code, 0, first.err);
   assert.equal(first.out.trim().split('\n').length, 1, 'one line');
-  assert.match(first.out, new RegExp(`^Opened http://localhost:3314/lab/constellation\\?connect=claude-code in your browser; started the plugin's relay 1\\.3\\.0 on port ${port}\\.`));
+  assert.match(first.out, new RegExp(`^Opened http://localhost:3314/lab/constellation\\?connect=claude-code in your browser; started the plugin's relay 1\\.4\\.0 on port ${port}\\.`));
   try {
     const again = await run([], { relay: OPEN, env });
-    assert.match(again.out, new RegExp(`the plugin's relay 1\\.3\\.0 is running on port ${port}\\.`));
+    assert.match(again.out, new RegExp(`the plugin's relay 1\\.4\\.0 is running on port ${port}\\.`));
     const h = await health(port);
     assert.equal(h.mode, 'plugin');
   } finally {

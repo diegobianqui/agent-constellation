@@ -275,16 +275,16 @@ const SECRET = {
 };
 const enc = p => p.replace(/[^a-zA-Z0-9]/g, '-');
 
-function transcriptFor(session, project = SECRET.path) {
-  const dir = path.join(CONFIG, 'projects', enc(project));
+function transcriptFor(session, project = SECRET.path, config = CONFIG) {
+  const dir = path.join(config, 'projects', enc(project));
   fs.mkdirSync(dir, { recursive: true });
   return path.join(dir, `${session}.jsonl`);
 }
 const userLine = (session, text) => JSON.stringify({ type: 'user', sessionId: session, cwd: SECRET.path, message: { role: 'user', content: text }, uuid: 'u-' + Math.random(), timestamp: new Date().toISOString() });
-function assistantLine(session, { id, req, model = 'claude-opus-5-5', usage, content, agentId }) {
+function assistantLine(session, { id, req, model = 'claude-opus-5-5', usage, content, agentId, ts = '2026-10-23T10:00:00.000Z' }) {
   return JSON.stringify({
     type: 'assistant', sessionId: session, cwd: SECRET.path, gitBranch: 'main', userType: 'external', ...(agentId ? { agentId, isSidechain: true } : {}),
-    requestId: req, uuid: 'a-' + Math.random(), timestamp: '2026-10-23T10:00:00.000Z',
+    requestId: req, uuid: 'a-' + Math.random(), timestamp: ts,
     message: { id, type: 'message', role: 'assistant', model, content, stop_reason: 'end_turn', usage: { service_tier: 'standard', ...usage } },
   });
 }
@@ -297,7 +297,7 @@ function usageIn(items) {
     if (it.path !== '/v1/logs') continue;
     for (const rl of it.body.resourceLogs) for (const sl of rl.scopeLogs) for (const lr of sl.logRecords) {
       const a = Object.fromEntries(lr.attributes.map(kv => [kv.key, kv.value.stringValue ?? Number(kv.value.intValue)]));
-      out.push({ session: a['session.id'], agent: a.agent_id, model: a.model, request: a.request_id, in: a.input_tokens, out: a.output_tokens, cacheRead: a.cache_read_tokens, cacheWrite: a.cache_creation_tokens, event: a['event.name'], body: lr.body.stringValue });
+      out.push({ session: a['session.id'], agent: a.agent_id, model: a.model, request: a.request_id, in: a.input_tokens, out: a.output_tokens, cacheRead: a.cache_read_tokens, cacheWrite: a.cache_creation_tokens, cacheWrite1h: a.cache_creation_1h_tokens, speed: a.speed, geo: a.inference_geo, source: a['usage.source'], event: a['event.name'], body: lr.body.stringValue });
     }
   }
   return out;
@@ -442,5 +442,199 @@ test('transcripts: with telemetry on, its own events are the source (no double c
     const usage = usageIn(s.items());
     assert.equal(usage.length, 1, 'only the telemetry event');
     assert.equal(usage[0].model, undefined);
+  } finally { s.close(); r.stop(); }
+});
+
+// ------------------------------------------------------------ telemetry per session, scan backfill
+
+// An OTLP logs body: one api_request event per call, as Claude Code's telemetry sends them.
+function telemetryLogs(session, calls) {
+  return {
+    resourceLogs: [{
+      resource: { attributes: [{ key: 'service.name', value: { stringValue: 'claude-code' } }, { key: 'session.id', value: { stringValue: session } }] },
+      scopeLogs: [{ scope: { name: 'com.anthropic.claude_code.events' }, logRecords: calls.map(c => ({
+        timeUnixNano: `${c.at}000000`, body: { stringValue: 'claude_code.api_request' },
+        attributes: [
+          { key: 'event.name', value: { stringValue: 'api_request' } },
+          { key: 'event.timestamp', value: { stringValue: new Date(c.at).toISOString() } },
+          { key: 'session.id', value: { stringValue: session } },
+          { key: 'request_id', value: { stringValue: c.req } },
+          { key: 'model', value: { stringValue: 'claude-opus-5-5' } },
+          { key: 'input_tokens', value: { intValue: '1' } }, { key: 'output_tokens', value: { intValue: '2' } },
+          { key: 'cost_usd', value: { doubleValue: 0.01 } },
+        ],
+      })) }],
+    }],
+  };
+}
+const postLogs = (port, body) => request(port, { method: 'POST', path: '/v1/logs', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+const iso = ms => new Date(ms).toISOString();
+
+test('telemetry per session: a session without it keeps its transcript usage; one with it counts each call once', async () => {
+  const r = await startPluginRelay();
+  const s = await openStream(r.port);
+  const withT = 'eeee1111-2222-3333-4444-555566667777';
+  const without = 'ffff1111-2222-3333-4444-555566667777';
+  const fileT = transcriptFor(withT);
+  const fileN = transcriptFor(without);
+  const t0 = Date.now() - 60000; // the session's telemetry started a minute ago
+  try {
+    // Telemetry for one session: two calls, the first at t0.
+    assert.equal((await postLogs(r.port, telemetryLogs(withT, [{ req: 'req_T1', at: t0 }, { req: 'req_T2', at: t0 + 5000 }]))).status, 200);
+    fs.writeFileSync(fileT, [
+      // Before its telemetry reached the relay, and not in it: counted from the transcript.
+      assistantLine(withT, { id: 'msg_T0', req: 'req_T0', usage: U(3, 30, 0, 0), content: [], ts: iso(t0 - 600000) }),
+      // In its telemetry: not counted again, whatever the time says.
+      assistantLine(withT, { id: 'msg_T1', req: 'req_T1', usage: U(1, 2, 0, 0), content: [], ts: iso(t0 - 1000) }),
+      assistantLine(withT, { id: 'msg_T2', req: 'req_T2', usage: U(1, 2, 0, 0), content: [], ts: iso(t0 + 5000) }),
+      // After its telemetry started, its event not here yet: telemetry will count it.
+      assistantLine(withT, { id: 'msg_T3', req: 'req_T3', usage: U(1, 2, 0, 0), content: [], ts: iso(Date.now()) }),
+      '',
+    ].join('\n'));
+    fs.writeFileSync(fileN, [
+      assistantLine(without, { id: 'msg_N1', req: 'req_N1', usage: U(10, 100, 1000, 50), content: [], ts: iso(Date.now() - 2000) }),
+      assistantLine(without, { id: 'msg_N2', req: 'req_N2', usage: U(20, 200, 2000, 0), content: [], ts: iso(Date.now()) }),
+      '',
+    ].join('\n'));
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'Stop', session_id: withT, transcript_path: fileT });
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'Stop', session_id: without, transcript_path: fileN });
+    await sleep(2800); // records wait 2 s while telemetry is arriving
+    const fromTranscripts = usageIn(s.items()).filter(u => u.source === 'transcript');
+    assert.deepEqual(fromTranscripts.map(u => [u.session, u.request]).sort(), [[withT, 'req_T0'], [without, 'req_N1'], [without, 'req_N2']].sort());
+    // Telemetry arrives for the call the transcript left to it, and the session's next call is read:
+    // still nothing twice.
+    await postLogs(r.port, telemetryLogs(withT, [{ req: 'req_T3', at: Date.now() }]));
+    fs.appendFileSync(fileT, assistantLine(withT, { id: 'msg_T4', req: 'req_T4', usage: U(1, 2, 0, 0), content: [], ts: iso(Date.now()) }) + '\n');
+    fs.appendFileSync(fileN, assistantLine(without, { id: 'msg_N3', req: 'req_N3', usage: U(1, 1, 0, 0), content: [], ts: iso(Date.now()) }) + '\n');
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'PostToolUse', session_id: withT, tool_name: 'Read', transcript_path: fileT });
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'PostToolUse', session_id: without, tool_name: 'Read', transcript_path: fileN });
+    await sleep(2800);
+    const all = usageIn(s.items());
+    assert.deepEqual(all.filter(u => u.source === 'transcript').map(u => u.request).sort(), ['req_N1', 'req_N2', 'req_N3', 'req_T0']);
+    assert.deepEqual(all.filter(u => u.source !== 'transcript').map(u => u.request), ['req_T1', 'req_T2', 'req_T3']);
+    // Each call once across both sources.
+    const ids = all.map(u => u.request);
+    assert.equal(new Set(ids).size, ids.length);
+    const h = JSON.parse((await request(r.port, { path: '/health', headers: { origin: PAGE } })).body);
+    assert.equal(h.version, '1.4.0');
+    assert.equal(h.counts.transcripts, 4);
+    assert.equal(h.counts.transcriptsSkipped, 4);
+  } finally { s.close(); r.stop(); }
+});
+
+test('telemetry that starts mid-way: calls before it from the transcript, after it from telemetry, each once', async () => {
+  const r = await startPluginRelay();
+  const s = await openStream(r.port);
+  const session = 'abab1111-2222-3333-4444-555566667777';
+  const file = transcriptFor(session);
+  try {
+    // No telemetry yet anywhere: the transcript's calls are published at once.
+    fs.writeFileSync(file, [
+      assistantLine(session, { id: 'msg_1', req: 'req_1', usage: U(1, 10, 0, 0), content: [], ts: iso(Date.now() - 120000) }),
+      assistantLine(session, { id: 'msg_2', req: 'req_2', usage: U(2, 20, 0, 0), content: [], ts: iso(Date.now() - 60000) }),
+      '',
+    ].join('\n'));
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'Stop', session_id: session, transcript_path: file });
+    await sleep(600);
+    assert.deepEqual(usageIn(s.items()).map(u => u.request), ['req_1', 'req_2']);
+    // Telemetry starts (a new relay, a resumed session): its first batch has call 3, and an
+    // exporter retry repeats call 2, which the page counts once by its request id.
+    const now = Date.now();
+    await postLogs(r.port, telemetryLogs(session, [{ req: 'req_2', at: now - 60000 }, { req: 'req_3', at: now }]));
+    fs.appendFileSync(file, [
+      assistantLine(session, { id: 'msg_3', req: 'req_3', usage: U(3, 30, 0, 0), content: [], ts: iso(now) }),
+      assistantLine(session, { id: 'msg_4', req: 'req_4', usage: U(4, 40, 0, 0), content: [], ts: iso(now + 10) }),
+      '',
+    ].join('\n'));
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'PostToolUse', session_id: session, tool_name: 'Read', transcript_path: file });
+    await sleep(2800);
+    await postLogs(r.port, telemetryLogs(session, [{ req: 'req_4', at: now + 10 }]));
+    await sleep(200);
+    const all = usageIn(s.items());
+    assert.deepEqual(all.filter(u => u.source === 'transcript').map(u => u.request), ['req_1', 'req_2']);
+    assert.deepEqual(all.filter(u => u.source !== 'transcript').map(u => u.request), ['req_2', 'req_3', 'req_4']);
+  } finally { s.close(); r.stop(); }
+});
+
+test('transcripts: 1-hour cache writes, fast mode and US-only inference pass as numbers and short words', async () => {
+  const r = await startPluginRelay();
+  const s = await openStream(r.port);
+  const session = 'acac1111-2222-3333-4444-555566667777';
+  const file = transcriptFor(session);
+  try {
+    fs.writeFileSync(file, [
+      assistantLine(session, { id: 'msg_F', req: 'req_F', usage: { ...U(5, 50, 100, 1000), cache_creation: { ephemeral_5m_input_tokens: 400, ephemeral_1h_input_tokens: 600 }, speed: 'fast', inference_geo: 'us' }, content: [] }),
+      assistantLine(session, { id: 'msg_G', req: 'req_G', usage: { ...U(5, 50, 100, 10), cache_creation: { ephemeral_1h_input_tokens: 'lots' }, speed: SECRET.prompt, inference_geo: SECRET.path }, content: [] }),
+      '',
+    ].join('\n'));
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'Stop', session_id: session, transcript_path: file });
+    await sleep(600);
+    assert.deepEqual(usageIn(s.items()).map(u => [u.request, u.cacheWrite, u.cacheWrite1h, u.speed, u.geo]), [
+      ['req_F', 1000, 600, 'fast', 'us'],
+      ['req_G', 10, undefined, undefined, undefined],
+    ]);
+    assert.ok(!s.text().includes(SECRET.prompt) && !s.text().includes(SECRET.path));
+  } finally { s.close(); r.stop(); }
+});
+
+test('scan: the sessions found get their token numbers too, within the same limits, no paths or text', async () => {
+  const config = path.join(TMP, 'scan-config');
+  const env = { ...ENV, CLAUDE_CONFIG_DIR: config };
+  const r = await startPluginRelay([], env);
+  const s = await openStream(r.port);
+  const A = '1a1a1111-2222-3333-4444-555566667777'; // hooks earlier, and a subagent
+  const B = '2b2b1111-2222-3333-4444-555566667777'; // no hooks ever (running before the plugin)
+  const C = '3c3c1111-2222-3333-4444-555566667777'; // a 34 MB transcript: only its last 32 MB on first sight
+  const OLD = '4d4d1111-2222-3333-4444-555566667777'; // changed 2 days ago: not in the scan
+  const fa = transcriptFor(A, SECRET.path, config);
+  const fb = transcriptFor(B, '/Users/jane/other-secret', config);
+  const fc = transcriptFor(C, SECRET.path, config);
+  const fo = transcriptFor(OLD, SECRET.path, config);
+  const line = (sess, id, extra = {}) => assistantLine(sess, { id: `msg_${id}`, req: `req_${id}`, usage: U(1, 2, 3, 4), content: [{ type: 'text', text: SECRET.reply }], ...extra });
+  try {
+    fs.writeFileSync(fa, line(A, 'A1') + '\n');
+    await hook([`http://127.0.0.1:${r.port}/hook`], { hook_event_name: 'Stop', session_id: A, transcript_path: fa });
+    await sleep(600);
+    assert.deepEqual(usageIn(s.items()).map(u => u.request), ['req_A1']);
+    fs.appendFileSync(fa, line(A, 'A2') + '\n');
+    const subDir = path.join(path.dirname(fa), A, 'subagents');
+    fs.mkdirSync(subDir, { recursive: true });
+    fs.writeFileSync(path.join(subDir, 'agent-sub1.jsonl'), line(A, 'AS', { agentId: 'sub1' }) + '\n');
+    fs.writeFileSync(path.join(subDir, 'notes.jsonl'), line(A, 'AX') + '\n'); // not a subagent's transcript
+    fs.symlinkSync(fb, path.join(subDir, 'agent-link.jsonl')); // a link: not followed
+    fs.writeFileSync(fb, [userLine(B, SECRET.prompt), line(B, 'B1'), line(B, 'B2'), ''].join('\n'));
+    // C: an early call, 34 MB of other lines, a late call.
+    const filler = userLine(C, 'x'.repeat(1000)) + '\n';
+    const fd = fs.openSync(fc, 'w');
+    fs.writeSync(fd, line(C, 'C_early') + '\n');
+    const chunk = filler.repeat(1024); // about 1 MB
+    for (let i = 0; i < 34; i++) fs.writeSync(fd, chunk);
+    fs.writeSync(fd, line(C, 'C_late') + '\n');
+    fs.closeSync(fd);
+    fs.writeFileSync(fo, line(OLD, 'O1') + '\n');
+    const twoDays = (Date.now() - 2 * 24 * 3600 * 1000) / 1000;
+    fs.utimesSync(fo, twoDays, twoDays);
+
+    const t = Date.now();
+    const res = await request(r.port, { path: '/sessions', headers: { origin: PAGE } });
+    const answeredIn = Date.now() - t;
+    assert.equal(res.status, 200);
+    const body = JSON.parse(res.body);
+    assert.deepEqual(body.sessions.map(x => x.session).sort(), [A, B, C].sort());
+    assert.equal(body.files, undefined, 'the transcript paths stay in the relay');
+    assert.ok(answeredIn < 1000, `the scan answered in ${answeredIn} ms`);
+    await sleep(3000);
+    const usage = usageIn(s.items());
+    assert.deepEqual(usage.map(u => u.request).sort(), ['req_A1', 'req_A2', 'req_AS', 'req_B1', 'req_B2', 'req_C_late'].sort());
+    assert.equal(usage.find(u => u.request === 'req_AS').agent, 'sub1');
+    // A second scan reads only what is new.
+    fs.appendFileSync(fb, line(B, 'B3') + '\n');
+    await request(r.port, { path: '/sessions', headers: { origin: PAGE } });
+    await sleep(1500);
+    assert.deepEqual(usageIn(s.items()).map(u => u.request).slice(usage.length), ['req_B3']);
+    const text = s.text();
+    for (const m of [SECRET.reply, SECRET.prompt, 'other-secret', enc(SECRET.path), config, TMP, '.jsonl', 'subagents', 'xxxxxxxxxx']) {
+      assert.ok(!text.includes(m), `stream contains ${m}`);
+    }
   } finally { s.close(); r.stop(); }
 });

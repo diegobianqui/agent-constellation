@@ -21,8 +21,28 @@ own browser. Never prompts, replies, commands, file paths, tool inputs or output
 Choose a scope in the panel that opens (for you, on every project: "Install for you"). If the
 install summary already says the plugin is active, `/reload-plugins` changes nothing.
 
-**Desktop app.** Its plugin browser lists plugins only from marketplaces you already added, so
-add this one from a terminal, once:
+**Desktop app (macOS).** Its plugin browser lists plugins only from marketplaces you already
+added, and a Mac with only the desktop app may have no `claude` command in Terminal: the app keeps
+its own copy of Claude Code's command under
+`~/Library/Application Support/Claude/claude-code/<version>/<hash>/claude.app/Contents/MacOS/claude`.
+So send this message in a Claude Code session in the desktop app. It carries one exact command,
+so Claude has nothing to look for: the command finds Claude Code's command (on the PATH or the
+desktop app's copy), checks for Node.js 18 or newer, adds the marketplace and installs the plugin.
+Running it twice is harmless ("already installed"). If Claude Code's command or Node.js is
+missing, it says so in one line.
+
+````
+Install the agent-constellation plugin for Claude Code. Run this exact command once with Bash and nothing else (it finds Claude Code's own command even when `claude` isn't on the PATH; running it twice is harmless). Don't search for files or run other checks first. Reply with only the command's last line, then: "Start a new session, then run /agent-constellation:open." If the line is an error, show it and stop.
+
+```
+C="$(command -v claude || ls -dt "$HOME/Library/Application Support/Claude/claude-code/"*/*/claude.app/Contents/MacOS/claude 2>/dev/null | head -1)"; [ -n "$C" ] || { echo "Claude Code's command wasn't found on this computer."; exit 1; }; node -e 'process.exit(parseInt(process.versions.node)<18?1:0)' 2>/dev/null || { echo "The plugin needs Node.js 18 or newer: nodejs.org"; exit 1; }; "$C" plugin marketplace add diegobianqui/agent-constellation >/dev/null && "$C" plugin install agent-constellation@agent-constellation 2>&1 | tail -1
+```
+````
+
+Then start a new session (plugins and hooks load when a session starts) and run
+`/agent-constellation:open` in it.
+
+Where `claude` works in a terminal, the same in two commands, once:
 
 ```
 claude plugin marketplace add diegobianqui/agent-constellation
@@ -33,7 +53,7 @@ With Claude Code 2.1.292 or later, one command does both:
 `claude plugin install agent-constellation --marketplace diegobianqui/agent-constellation`.
 The terminal, the desktop app's local sessions and the VS Code extension read the same settings,
 so the plugin then appears on the desktop app's Plugins page and is on in the local sessions you
-start next.
+start next. On Windows, run these two commands in a terminal where `claude` works.
 
 **VS Code.** Type `/plugins` in the Claude Code panel to open **Manage plugins**. On the
 **Marketplaces** tab, add `diegobianqui/agent-constellation`; on the **Plugins** tab, click
@@ -56,7 +76,34 @@ macOS, `xdg-open` on Linux, `start` on Windows); the page connects by itself. Or
 yourself, after a session started or sent a prompt, and press **Connect Claude Code**. No
 download, no settings to edit, no pairing code.
 
-Needs Node.js 18 or later, as `node` on the PATH that Claude Code runs hooks with.
+Needs Node.js 18 or newer, as `node` on the PATH that Claude Code runs hooks with: check with
+`node -v`.
+
+## Updating from an earlier version
+
+In a terminal where `claude` works:
+
+```
+claude plugin marketplace update agent-constellation
+claude plugin update agent-constellation@agent-constellation
+```
+
+Then type `/reload-plugins` in an open session, or start a new session.
+
+On a Mac with only the desktop app, Claude Code's command is the desktop app's copy (above). The
+install message above doesn't update a plugin that is already installed (it answers "already
+installed"), so send this one in a Claude Code session in the desktop app instead. It is the same
+message with the update commands:
+
+````
+Update the agent-constellation plugin for Claude Code. Run this exact command once with Bash and nothing else (it finds Claude Code's own command even when `claude` isn't on the PATH; running it twice is harmless). Don't search for files or run other checks first. Reply with only the command's last line, then: "Start a new session for the new version to load." If the line is an error, show it and stop.
+
+```
+C="$(command -v claude || ls -dt "$HOME/Library/Application Support/Claude/claude-code/"*/*/claude.app/Contents/MacOS/claude 2>/dev/null | head -1)"; [ -n "$C" ] || { echo "Claude Code's command wasn't found on this computer."; exit 1; }; node -e 'process.exit(parseInt(process.versions.node)<18?1:0)' 2>/dev/null || { echo "The plugin needs Node.js 18 or newer: nodejs.org"; exit 1; }; "$C" plugin marketplace update agent-constellation >/dev/null && "$C" plugin update agent-constellation@agent-constellation 2>&1 | tail -1
+```
+````
+
+Not installed yet? Send the install message above.
 
 ## What it does
 
@@ -81,20 +128,26 @@ from a hook or on install: only `/agent-constellation:open` does, when you run i
 The relay is one file with no dependencies, `plugins/agent-constellation/relay/constellation-relay.mjs`.
 Read it before you install: the comment at the top says exactly what it does.
 
-### Token counts without telemetry
+### Token counts and costs without telemetry
 
 Hook events don't carry token counts. When a hook event names the session's transcript (the
 JSONL file Claude Code keeps on your computer), the relay reads the lines added since its last read
-and keeps, for each model call, only: input, output, cache read and cache creation tokens, the model
-name and the request id. The text stays in the file, and the transcript's path never leaves the
-relay. Reads are incremental, bounded, and a line still being written waits for the next read. A
-subagent's calls are read from its own transcript and counted on its star.
+and keeps, for each model call, only: input, output, cache read and cache creation tokens (and how
+many of those went to the 1-hour cache), the model name, the request id, and whether the call used
+fast mode or US-only inference. The text stays in the file, and the transcript's path never leaves
+the relay. Reads are incremental and bounded (a transcript seen for the first time: its last
+32 MB; at most 8 MB per pass, then it continues), and a line still being written waits for the
+next read. A subagent's calls are read from its own transcript and counted on its star.
+
+The lab page estimates each of these calls' cost from its tokens at the Claude API's list prices,
+and shows it with "≈". On a Pro or Max plan that is what the same use would cost on the API, not
+what you pay. Calls of a model it has no price for show "no price for" that model.
 
 ## What leaves the relay
 
 To the lab page in your browser, and nowhere else: event names, session, agent and tool use ids,
-agent types and tool names, timings, success flags, permission modes, model names and token
-counts, and two names so you can tell your sessions apart: the project folder's name (never its
+agent types and tool names, timings, success flags, permission modes, model names, request ids
+and token counts, and two names so you can tell your sessions apart: the project folder's name (never its
 path) and the session's title.
 
 Never: prompts, replies, commands, file paths, tool inputs or outputs, error messages, your email,
@@ -102,8 +155,10 @@ account or organization ids. Nothing is sent to diegobianqui.com or to any other
 talks to the relay from your browser, over your computer's loopback interface. The relay keeps the
 last events in memory only and forgets them when it stops.
 
-"Scan sessions" on the page lists your sessions from the last 24 hours: the relay reads only the
-file names and times in `~/.claude/projects` for that, never their contents.
+"Scan sessions" on the page lists your sessions from the last 24 hours, from the file names and
+times in `~/.claude/projects`. Then the relay reads those sessions' token numbers (as above, the
+same limits), so sessions that were already running when you installed the plugin, which send no
+hook events until they restart, show their tokens and estimated costs too.
 
 Sessions that run in the cloud (Claude Code on the web) can't reach your computer, so they can't
 be shown.
@@ -143,8 +198,11 @@ plugin sends the hook events. It shows what changed; start a new session for it 
 replaced; `/agent-constellation:telemetry` alone shows what is set. Neither touches any hook.
 Claude never runs these commands on its own (`disable-model-invocation`): only when you type them.
 
-When telemetry arrives, its own events are the source of token counts and the transcripts are not
-counted again.
+Telemetry is counted per session. A session whose telemetry reaches the relay has each call
+counted from its own events, with Claude Code's own cost estimate; its transcript fills in only the
+calls from before its telemetry started (a session that was running when you turned telemetry on,
+or a relay started later), and each call is counted once, by its request id. Sessions without
+telemetry keep their token counts from the transcripts, whatever other sessions do.
 
 Without the plugin, use the relay by hand, with a pairing code:
 

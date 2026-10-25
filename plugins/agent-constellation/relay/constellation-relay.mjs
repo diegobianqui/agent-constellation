@@ -18,9 +18,12 @@
  *      present the pairing code printed when the relay starts, and only the lab's own origin
  *      may read the stream.
  *   4. Token counts without telemetry: when a hook event names the session's transcript (the
- *      JSONL file Claude Code keeps on this computer), the relay reads the new lines of that
- *      file locally and keeps only numbers from them: input, output and cache tokens and the
- *      model of each model call. Never the text, never the file's path.
+ *      JSONL file Claude Code keeps on this computer), or "Scan sessions" on the page finds it,
+ *      the relay reads the new lines of that file locally and keeps only numbers from them:
+ *      input, output and cache tokens, the model and the request id of each model call (and,
+ *      when set, fast mode and US-only inference, which change the price). Never the text, never
+ *      the file's path. For a session whose telemetry reaches the relay, its telemetry counts
+ *      each call and the transcript only fills in calls from before it started (each call once).
  *
  * Nothing is sent to diegobianqui.com or to any other server. The page talks to this relay from
  * your browser, over your computer's loopback interface. The relay keeps the last events in
@@ -66,8 +69,9 @@
  *                                          payload per message, as { path, body, ts }
  *   GET  /sessions                         to the page: the Claude Code sessions on this computer
  *                                          from the last 24 hours (id, project folder name, last
- *                                          active). It reads only the file names and times in
- *                                          ~/.claude/projects, never their contents.
+ *                                          active), from the file names and times in
+ *                                          ~/.claude/projects. Afterwards the relay reads those
+ *                                          sessions' token numbers, as in 4, and streams them.
  *   The page's requests need "Authorization: Bearer <pairing code>" (in plugin mode: an allowed
  *   Origin instead).
  */
@@ -81,7 +85,7 @@ import crypto from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '1.3.0';
+const VERSION = '1.4.0';
 const SELF = fileURLToPath(import.meta.url);
 const DEFAULT_PORT = 4318;
 // For tests only: the plugin's hooks use this port, and pass these extra page origins to the
@@ -100,6 +104,7 @@ const KEEPALIVE_MS = 15000;
 const SCAN_WINDOW_MS = 24 * 3600 * 1000; // /sessions: transcripts changed in the last 24 hours
 const SCAN_ACTIVE_MS = 2 * 60 * 1000;    // ...and "active now": changed in the last 2 minutes
 const SCAN_MAX = 50;
+const SCAN_SUBAGENTS_MAX = 20;           // ...and per session, its most recent subagent transcripts
 const IDLE_MS = 30 * 60 * 1000;          // plugin mode: exit after this long with no hooks and no page
 // Hooks installed twice: two copies of one event (same event, session, tool use, agent and task)
 // from the two kinds of hooks, stamped within DUP_MS of each other, are one event. /health says
@@ -179,10 +184,10 @@ names and token counts, and (unless --no-names) each session's project folder na
 Never prompts, replies, commands, paths, tool inputs or outputs, error messages, email or
 account ids. Nothing goes to any server.
 Token counts come from telemetry or, without it, from the session transcripts on this computer:
-the relay reads the new lines of a transcript when a hook event names it and keeps only the
-token numbers and the model name of each model call.
-"Scan sessions" on the page lists your sessions from the last 24 hours: the relay reads only
-file names and times in ~/.claude/projects, never their contents.
+the relay reads the new lines of a transcript when a hook event names it (or a scan finds it)
+and keeps only the token numbers, the model name and the request id of each model call.
+"Scan sessions" on the page lists your sessions from the last 24 hours from the file names and
+times in ~/.claude/projects, then reads those sessions' token numbers the same way.
 Cloud sessions (Claude Code on the web) can't reach this computer, so they can't be shown.
 `;
 
@@ -383,7 +388,8 @@ export function stripLogs(body) {
 // <config dir>/projects/<project folder>/<session id>.jsonl, where the folder name is the
 // project's path with every character other than a letter or digit turned into "-". This reads
 // directory listings and file times only (readdir, stat), never a file's contents, and returns
-// the session id, when it last changed and, with names, the project's last folder name.
+// the session id, when it last changed and, with names, the project's last folder name. The relay
+// then hands the transcripts it found to the transcript reader below (token numbers only).
 
 function claudeConfigDir() {
   return process.env.CLAUDE_CONFIG_DIR || path.join(os.homedir(), '.claude');
@@ -425,7 +431,13 @@ async function projectName(encoded, cache) {
   return result;
 }
 
-export async function scanSessions({ names = true, dir = path.join(claudeConfigDir(), 'projects'), now = Date.now() } = {}) {
+/**
+ * The sessions from the last 24 hours, newest first. With withFiles, also `files`: the transcripts
+ * of those sessions (each session's own, and its subagents' in <session id>/subagents/), for the
+ * relay's transcript reader only. Their paths are built from directory listings here, never from
+ * anything a request says, and never leave the relay.
+ */
+export async function scanSessions({ names = true, dir = path.join(claudeConfigDir(), 'projects'), now = Date.now(), withFiles = false } = {}) {
   const found = [];
   let projects;
   try { projects = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return { sessions: [], scanned: false }; }
@@ -447,6 +459,7 @@ export async function scanSessions({ names = true, dir = path.join(claudeConfigD
   found.sort((a, b) => b.lastActive - a.lastActive);
   const cache = new Map();
   const sessions = [];
+  const files = [];
   for (const f of found.slice(0, SCAN_MAX)) {
     const item = { session: f.session, lastActive: f.lastActive, active: now - f.lastActive < SCAN_ACTIVE_MS };
     if (names) {
@@ -454,8 +467,32 @@ export async function scanSessions({ names = true, dir = path.join(claudeConfigD
       if (project) item.project = project;
     }
     sessions.push(item);
+    if (withFiles) {
+      files.push({ file: path.join(dir, f.folder, `${f.session}.jsonl`), session: f.session });
+      files.push(...await subagentTranscripts(path.join(dir, f.folder, f.session, 'subagents'), f.session, now));
+    }
   }
-  return { sessions, scanned: true, total: found.length };
+  const result = { sessions, scanned: true, total: found.length };
+  if (withFiles) result.files = files;
+  return result;
+}
+
+// A session's subagent transcripts (agent-<agent id>.jsonl, plain files only) changed in the last
+// 24 hours, the most recent SCAN_SUBAGENTS_MAX.
+async function subagentTranscripts(dir, session, now) {
+  let entries;
+  try { entries = await fs.promises.readdir(dir, { withFileTypes: true }); } catch { return []; }
+  const out = [];
+  for (const e of entries.slice(0, 2000)) {
+    const m = /^agent-(.+)\.jsonl$/.exec(e.name);
+    if (!m || !e.isFile() || !ID.test(m[1])) continue;
+    let st;
+    try { st = await fs.promises.stat(path.join(dir, e.name)); } catch { continue; }
+    if (now - st.mtimeMs > SCAN_WINDOW_MS) continue;
+    out.push({ file: path.join(dir, e.name), session, agent: m[1], at: st.mtimeMs });
+  }
+  out.sort((a, b) => b.at - a.at);
+  return out.slice(0, SCAN_SUBAGENTS_MAX).map(t => ({ file: t.file, session: t.session, agent: t.agent }));
 }
 
 // ---------------------------------------------------------------- transcripts: token numbers only
@@ -472,7 +509,8 @@ const T_CHUNK = 1 << 20;            // bytes per read
 const T_MAX_PASS = 8 << 20;         // bytes per pass; a longer backlog continues a moment later
 const T_FIRST_MAX = 32 << 20;       // a transcript seen for the first time: at most its last 32 MB
 const T_LINE_MAX = 4 << 20;         // longer lines (pasted images, huge tool results) are skipped
-const T_FILES_MAX = 200;            // transcripts followed at once (least recently read dropped)
+const T_FILES_MAX = 1000;           // transcripts followed at once (least recently read dropped)
+const T_READS_MAX = 4;              // transcripts read at the same moment (a scan can name many)
 const T_SEEN_MAX = 5000;            // message ids remembered per transcript, to count each call once
 const MAX_TOKENS = 1e9;
 
@@ -524,10 +562,18 @@ export function usageFromLine(line) {
     cacheRead: tokenCount(u.cache_read_input_tokens), cacheWrite: tokenCount(u.cache_creation_input_tokens),
   };
   if (!tokens.in && !tokens.out && !tokens.cacheRead && !tokens.cacheWrite) return null;
+  // The part of the cache writes that went to the 1-hour cache (priced higher than the 5-minute one).
+  const c = u.cache_creation && typeof u.cache_creation === 'object' ? u.cache_creation : null;
+  const hour = c ? Math.min(tokenCount(c.ephemeral_1h_input_tokens), tokens.cacheWrite) : 0;
+  if (hour) tokens.cacheWrite1h = hour;
   const messageId = typeof o.message.id === 'string' && ID.test(o.message.id) ? o.message.id : null;
   const requestId = typeof o.requestId === 'string' && ID.test(o.requestId) ? o.requestId : null;
   const ts = typeof o.timestamp === 'string' ? Date.parse(o.timestamp) : NaN;
-  return { key: messageId || requestId, requestId: requestId || messageId, model, tokens, ts: Number.isFinite(ts) ? ts : Date.now() };
+  const r = { key: messageId || requestId, requestId: requestId || messageId, model, tokens, ts: Number.isFinite(ts) ? ts : Date.now() };
+  // Price modifiers, as short words: fast mode, and US-only inference.
+  if (u.speed === 'fast') r.speed = 'fast';
+  if (typeof u.inference_geo === 'string' && /^[a-z_]{1,16}$/.test(u.inference_geo)) r.geo = u.inference_geo;
+  return r;
 }
 
 /** Usage records as an OTLP logs body of Claude Code api_request events, which the lab page reads. */
@@ -548,6 +594,9 @@ export function usageToLogs(records, { session, agent }) {
       { key: 'output_tokens', value: int(r.tokens.out) },
       { key: 'cache_read_tokens', value: int(r.tokens.cacheRead) },
       { key: 'cache_creation_tokens', value: int(r.tokens.cacheWrite) },
+      ...(r.tokens.cacheWrite1h ? [{ key: 'cache_creation_1h_tokens', value: int(r.tokens.cacheWrite1h) }] : []),
+      ...(r.speed ? [{ key: 'speed', value: str(r.speed) }] : []),
+      ...(r.geo ? [{ key: 'inference_geo', value: str(r.geo) }] : []),
     ],
   }));
   return { resourceLogs: [{ resource: { attributes: [{ key: 'service.name', value: str('constellation-relay') }] }, scopeLogs: [{ scope: { name: 'constellation-relay.transcripts', version: VERSION }, logRecords }] }] };
@@ -558,7 +607,22 @@ export function usageToLogs(records, { session, agent }) {
  * the new usage records. One read at a time per file.
  */
 export function createTranscriptReader({ emit }) {
-  const files = new Map(); // file -> { offset, skipping, seen: Set, order: [], timer, reading, again, session, agent }
+  const files = new Map(); // file -> { offset, skipping, seen: Set, order: [], timer, reading, again, queued, session, agent }
+  let active = 0;          // reads running now, at most T_READS_MAX
+  const waiting = [];      // [file, state] waiting for a free read
+
+  function schedule(file, st) {
+    if (active >= T_READS_MAX) {
+      if (!st.queued) { st.queued = true; waiting.push([file, st]); }
+      return;
+    }
+    active++;
+    read(file, st).finally(() => {
+      active--;
+      const next = waiting.shift();
+      if (next) { next[1].queued = false; schedule(next[0], next[1]); }
+    });
+  }
 
   function stateOf(t) {
     let st = files.get(t.file);
@@ -581,7 +645,7 @@ export function createTranscriptReader({ emit }) {
   function trigger(t, delay = 250) {
     const st = stateOf(t);
     if (st.timer) return;
-    st.timer = setTimeout(() => { st.timer = null; read(t.file, st); }, delay);
+    st.timer = setTimeout(() => { st.timer = null; schedule(t.file, st); }, delay);
     if (st.timer.unref) st.timer.unref();
   }
 
@@ -648,7 +712,7 @@ export function createTranscriptReader({ emit }) {
       if (st.again) {
         st.again = false;
         if (!st.timer) {
-          st.timer = setTimeout(() => { st.timer = null; read(file, st); }, 20);
+          st.timer = setTimeout(() => { st.timer = null; schedule(file, st); }, 20);
           if (st.timer.unref) st.timer.unref();
         }
       }
@@ -656,6 +720,95 @@ export function createTranscriptReader({ emit }) {
   }
 
   return { trigger, files };
+}
+
+// ---------------------------------------------------------------- telemetry and transcripts: count each call once
+//
+// The same model call can reach the page twice: as the api_request event (and llm_request span)
+// that a session's telemetry sends, and as a usage record read from its transcript. Both carry
+// the API's request id (request_id in telemetry, requestId in the transcript). The rule, per
+// session:
+//   - A session is a telemetry session from the first OTLP record carrying its session.id that
+//     reaches this relay. `since` is the earliest event time in what it has sent (an exporter
+//     that retries an older batch moves it back).
+//   - For a telemetry session, a transcript record is not published when its request id was in
+//     that session's telemetry, or when it happened at or after `since` (telemetry was on for that
+//     call, so its own event counts it, even if that event hasn't arrived yet).
+//   - Every other transcript record is published: sessions without telemetry, and calls from
+//     before a session's telemetry reached the relay (a relay started after the session, a
+//     session started before telemetry was turned on) that telemetry didn't send.
+//   - While any telemetry is arriving, transcript records wait T_HOLD_MS before this check, so a
+//     call's api_request event, exported every second, is usually here first.
+//   - What is left (a transcript record published before that session's first telemetry arrived,
+//     carrying a request id telemetry then sends too) the page counts once: by request id, with
+//     telemetry's cost in place of the estimate.
+
+const T_HOLD_MS = 2000;
+const OTEL_SESSIONS_MAX = 500;   // telemetry sessions remembered (least recently heard from dropped)
+const OTEL_IDS_MAX = 5000;       // request ids remembered per session
+
+// Milliseconds from an OTLP time (nanoseconds, as a string or a number), or 0.
+function otlpMs(t) {
+  if (typeof t === 'string' && /^\d{7,20}$/.test(t)) return Number(t.slice(0, -6));
+  if (isNum(t) && t > 1e12) return Math.round(t / 1e6);
+  return 0;
+}
+
+export function createTelemetrySessions({ now = () => Date.now() } = {}) {
+  const sessions = new Map(); // session id -> { since, ids: Set, order: [] }
+
+  function record(session, at, requestId) {
+    if (typeof session !== 'string' || !ID.test(session)) return;
+    const t = now();
+    // An event time from the future, or from long ago (a clock that jumped), counts as now.
+    const when = at > 0 && at <= t && t - at < 30 * 24 * 3600 * 1000 ? at : t;
+    let e = sessions.get(session);
+    if (!e) {
+      e = { since: when, ids: new Set(), order: [] };
+      if (sessions.size >= OTEL_SESSIONS_MAX) sessions.delete(sessions.keys().next().value);
+    } else {
+      sessions.delete(session); // most recently heard from last, for the eviction above
+      if (when < e.since) e.since = when;
+    }
+    sessions.set(session, e);
+    if (typeof requestId === 'string' && ID.test(requestId) && !e.ids.has(requestId)) {
+      e.ids.add(requestId);
+      e.order.push(requestId);
+      if (e.order.length > OTEL_IDS_MAX) e.ids.delete(e.order.shift());
+    }
+  }
+
+  const attr = (list, k) => {
+    const kv = Array.isArray(list) && list.find(a => a && a.key === k);
+    return kv && kv.value ? kv.value.stringValue : undefined;
+  };
+
+  /** Notes the sessions and request ids in a stripped OTLP logs or traces body. */
+  function note(body) {
+    for (const rl of (body && body.resourceLogs) || []) {
+      const res = attr(rl.resource && rl.resource.attributes, 'session.id');
+      for (const sl of rl.scopeLogs || []) for (const lr of sl.logRecords || []) {
+        const iso = Date.parse(attr(lr.attributes, 'event.timestamp') || '');
+        const at = Number.isFinite(iso) ? iso : otlpMs(lr.timeUnixNano) || otlpMs(lr.observedTimeUnixNano);
+        record(attr(lr.attributes, 'session.id') || res, at, attr(lr.attributes, 'request_id'));
+      }
+    }
+    for (const rs of (body && body.resourceSpans) || []) {
+      const res = attr(rs.resource && rs.resource.attributes, 'session.id');
+      for (const ss of rs.scopeSpans || []) for (const sp of ss.spans || []) {
+        record(attr(sp.attributes, 'session.id') || res, otlpMs(sp.startTimeUnixNano), attr(sp.attributes, 'request_id') || attr(sp.attributes, 'gen_ai.response.id'));
+      }
+    }
+  }
+
+  /** True when telemetry counts this transcript record of this session (so it is not published). */
+  function covers(session, r) {
+    const e = sessions.get(session);
+    if (!e) return false;
+    return (!!r.requestId && e.ids.has(r.requestId)) || r.ts >= e.since;
+  }
+
+  return { note, covers, sessions };
 }
 
 // ---------------------------------------------------------------- start: the relay
@@ -706,7 +859,7 @@ function startRelay() {
 
   const buffer = [];
   const viewers = new Set();
-  const counts = { traces: 0, logs: 0, metrics: 0, hooks: 0, transcripts: 0, duplicates: 0 };
+  const counts = { traces: 0, logs: 0, metrics: 0, hooks: 0, transcripts: 0, transcriptsSkipped: 0, duplicates: 0 };
   const lastSeen = { otel: 0, hooks: 0, transcripts: 0 };
   const viaSeen = { plugin: 0, settings: 0 }; // when each kind of hook last sent an event
   let twiceAt = 0;                            // when the last pair of copies arrived
@@ -727,15 +880,26 @@ function startRelay() {
 
   function log(msg) { if (!PLUGIN) console.log(`${new Date().toTimeString().slice(0, 8)}  ${msg}`); }
 
-  // Token numbers from the transcripts the hook events name. With telemetry on, its own
-  // api_request events (which also carry the cost) are the source: the transcripts are still
-  // followed, so nothing is counted twice when telemetry stops, but nothing is published.
+  // Token numbers from the transcripts (the ones hook events name, and the ones a scan finds),
+  // per session. A session whose telemetry reaches this relay has its own api_request events
+  // (which also carry Claude Code's cost estimate): for it, a transcript record is published only
+  // if telemetry can't have sent it (see telemetryCovers). Sessions without telemetry keep
+  // publishing transcript usage, whatever other sessions do.
+  const otelSessions = createTelemetrySessions();
   const transcripts = createTranscriptReader({
     emit(records, st) {
-      if (Date.now() - lastSeen.otel < 5 * 60 * 1000) return;
-      counts.transcripts += records.length;
-      lastSeen.transcripts = Date.now();
-      publish({ path: '/v1/logs', body: stripLogs(usageToLogs(records, st)), ts: Date.now() });
+      const out = () => {
+        const kept = records.filter(r => !otelSessions.covers(st.session, r));
+        counts.transcriptsSkipped += records.length - kept.length;
+        if (!kept.length) return;
+        counts.transcripts += kept.length;
+        lastSeen.transcripts = Date.now();
+        publish({ path: '/v1/logs', body: stripLogs(usageToLogs(kept, st)), ts: Date.now() });
+      };
+      // While telemetry is arriving here, wait a moment: a call's own api_request event (sent
+      // every second) may be on its way, and then it, not the transcript, counts the call.
+      if (Date.now() - lastSeen.otel < 10 * 60 * 1000) setTimeout(out, T_HOLD_MS).unref();
+      else out();
     },
   });
   // The transcript can lag the hook that ends a turn: read again a moment later.
@@ -797,8 +961,15 @@ function startRelay() {
     lastSeen.otel = Date.now();
     lastActivity = Date.now();
     // Metrics are counted, not forwarded: the lab draws from traces, events and hooks.
-    if (signal === 'traces') publish({ path: '/v1/traces', body: stripTraces(body), ts: Date.now() });
-    else if (signal === 'logs') publish({ path: '/v1/logs', body: stripLogs(body), ts: Date.now() });
+    if (signal === 'traces') {
+      const stripped = stripTraces(body);
+      otelSessions.note(stripped);
+      publish({ path: '/v1/traces', body: stripped, ts: Date.now() });
+    } else if (signal === 'logs') {
+      const stripped = stripLogs(body);
+      otelSessions.note(stripped);
+      publish({ path: '/v1/logs', body: stripped, ts: Date.now() });
+    }
   }
 
   async function ingestHook(req, res) {
@@ -951,7 +1122,15 @@ function startRelay() {
             duplicateHooks: twiceAt > 0 && now - twiceAt < TWICE_MS,
           }, cors(req));
         }
-        if (route === '/sessions') return send(res, 200, await scanSessions({ names: NAMES }), cors(req));
+        if (route === '/sessions') {
+          const { files, ...found } = await scanSessions({ names: NAMES, withFiles: true });
+          send(res, 200, found, cors(req));
+          // Sessions already running when the plugin was installed send no hook events: read the
+          // token numbers of the transcripts the scan found too (same reader, same limits, after
+          // the answer; usage is published as it is read). Spread out a little.
+          (files || []).forEach((t, i) => transcripts.trigger(t, 50 + 10 * i));
+          return;
+        }
         return openStream(req, res);
       }
 
