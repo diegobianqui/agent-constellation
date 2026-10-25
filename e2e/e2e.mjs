@@ -291,9 +291,13 @@ async function main() {
     toolRuns.push(ran && ran.tool);
     check(`${prompt}: Claude Code offered a shell tool (${ran ? ran.tool : 'none'})`, ran, `claude exit ${r.code}: ${r.out}\n${r.err}`);
     if (!ran) return null;
-    check(`${prompt}: the command from the skill`, ran.command === expectCommand, `${ran.command}\nexpected ${expectCommand}`);
-    check(`${prompt}: allowed and run without asking, output as expected`, result && !result.toolResult.isError && expectOut.test(result.toolResult.text), result ? result.toolResult.text : `no tool result; claude: ${r.out} ${r.err}`);
-    return result && result.toolResult.text;
+    // Claude Code fills in the plugin root with forward slashes on Windows (D:/a/...).
+    const want = WIN ? expectCommand.replace(/\\/g, '/') : expectCommand;
+    check(`${prompt}: the command from the skill`, ran.command === want, `${ran.command}\nexpected ${want}`);
+    // Claude Code may add a note of its own after the command's output ("Shell cwd was reset ...").
+    const output = result ? result.toolResult.text.replace(/\n+Shell cwd was reset to .*$/, '') : '';
+    check(`${prompt}: allowed and run without asking, output as expected`, result && !result.toolResult.isError && expectOut.test(output), result ? result.toolResult.text : `no tool result; claude: ${r.out} ${r.err}`);
+    return output;
   }
   const [cmdOpen] = skillCommands('open');
   const [cmdOn, cmdOff, cmdStatus] = skillCommands('telemetry');

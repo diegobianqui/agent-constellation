@@ -90,7 +90,7 @@ import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
-const VERSION = '1.5.0';
+const VERSION = '1.5.1';
 const SELF = fileURLToPath(import.meta.url);
 const DEFAULT_PORT = 4318;
 // For tests only, from the environment (read by these literal names, nowhere else):
@@ -660,10 +660,19 @@ export function createTranscriptReader({ emit }) {
     st.reading = true;
     let fh;
     try {
-      fh = await fs.promises.open(file, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)).catch(() => null);
+      // A symbolic link is never followed. Windows has no O_NOFOLLOW: there the file is looked at
+      // first (a link or junction is refused), and the file opened must be the one looked at.
+      const NOFOLLOW = fs.constants.O_NOFOLLOW || 0;
+      let looked = null;
+      if (!NOFOLLOW) {
+        looked = await fs.promises.lstat(file).catch(() => null);
+        if (!looked || !looked.isFile()) return;
+      }
+      fh = await fs.promises.open(file, fs.constants.O_RDONLY | NOFOLLOW).catch(() => null);
       if (!fh) return;
       const stat = await fh.stat();
       if (!stat.isFile()) return;
+      if (looked && (stat.ino !== looked.ino || stat.dev !== looked.dev)) return;
       const size = stat.size;
       if (st.offset < 0) {
         st.offset = Math.max(0, size - T_FIRST_MAX);

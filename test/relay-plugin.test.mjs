@@ -205,7 +205,7 @@ test('started by hand: no pairing code, the same exact origins as plugin mode, n
     const h = JSON.parse((await request(port, { path: '/health', headers: { origin: SITE } })).body);
     assert.equal(h.ok, true);
     assert.equal(h.mode, 'manual');
-    assert.equal(h.version, '1.5.0');
+    assert.equal(h.version, '1.5.1');
     assert.equal('pairing' in h, false);
     // The stream answers the page with no Authorization header.
     const s = await openStream(port, SITE);
@@ -260,7 +260,7 @@ test('hook --start: one relay for many hooks at once; all events arrive', async 
 
 test('hook --start: starts nothing when another program holds the port, and stays silent', async () => {
   const sockets = [];
-  const other = net.createServer(s => { sockets.push(s); s.end('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n'); }).listen(0, '127.0.0.1');
+  const other = net.createServer(s => { sockets.push(s); s.on('error', () => {}); s.end('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n'); }).listen(0, '127.0.0.1');
   await new Promise(r => other.on('listening', r));
   const port = other.address().port;
   const env = { ...ENV, CONSTELLATION_RELAY_PORT: String(port) };
@@ -558,7 +558,7 @@ test('telemetry per session: a session without it keeps its transcript usage; on
     const ids = all.map(u => u.request);
     assert.equal(new Set(ids).size, ids.length);
     const h = JSON.parse((await request(r.port, { path: '/health', headers: { origin: PAGE } })).body);
-    assert.equal(h.version, '1.5.0');
+    assert.equal(h.version, '1.5.1');
     assert.equal(h.counts.transcripts, 4);
     assert.equal(h.counts.transcriptsSkipped, 4);
   } finally { s.close(); r.stop(); }

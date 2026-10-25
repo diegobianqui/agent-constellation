@@ -46,7 +46,7 @@ jobs:
           - { name: "windows, PowerShell", os: windows-latest, shell: pwsh, args: --github }
           # Git Bash hidden from Claude Code: it runs hooks and commands with PowerShell (and
           # without git, nothing is installed from GitHub).
-          - { name: "windows, PowerShell, no Git Bash", os: windows-latest, shell: pwsh, args: --no-git-bash }
+          - { name: "windows, PowerShell, no Git Bash", os: windows-latest, shell: pwsh, args: --no-git-bash, hide-git: true }
     defaults:
       run:
         shell: ${{ matrix.shell }}
@@ -60,6 +60,14 @@ jobs:
       - name: Claude Code's CLI
         shell: bash
         run: npm install -g --no-fund --no-audit "@anthropic-ai/claude-code@$(node -p "require('./package.json').config.claudeCodeVersion")"
+      # Claude Code also looks for Git Bash where Git for Windows installs it, so hiding it from the
+      # PATH isn't enough: the folder is renamed for the test, and back afterwards.
+      - name: Hide Git for Windows
+        if: matrix.hide-git
+        run: Rename-Item -Path 'C:\Program Files\Git' -NewName 'Git-hidden-for-e2e'
       - name: End-to-end
         timeout-minutes: 12
         run: node e2e/e2e.mjs ${{ matrix.args }}
+      - name: Put Git for Windows back
+        if: always() && matrix.hide-git
+        run: if (Test-Path 'C:\Program Files\Git-hidden-for-e2e') { Rename-Item -Path 'C:\Program Files\Git-hidden-for-e2e' -NewName 'Git' }

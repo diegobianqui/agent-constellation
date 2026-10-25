@@ -15,7 +15,7 @@ import net from 'node:net';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { relayPids } from './processes.mjs';
 
 const ROOT = path.join(path.dirname(fileURLToPath(import.meta.url)), '..');
@@ -271,7 +271,7 @@ test('setup output: no "Start the relay" when one answers, no hooks line without
     const s = settingsFile('out-plugin', {});
     const r = await run(['setup', '--no-hooks', '--plugin', '--settings', s.f, '--port', String(p.port)]);
     assert.equal(r.code, 0, r.err);
-    assert.match(r.out, new RegExp(`The plugin's relay 1\\.5\\.0 is running on port ${p.port}: telemetry goes to it\\.`));
+    assert.match(r.out, new RegExp(`The plugin's relay 1\\.5\\.1 is running on port ${p.port}: telemetry goes to it\\.`));
     assert.doesNotMatch(r.out, /Start the relay/);
     assert.doesNotMatch(r.out, /hooks run this file/);
     assert.match(r.out, /1\. Start a new Claude Code session/);
@@ -279,14 +279,14 @@ test('setup output: no "Start the relay" when one answers, no hooks line without
     // The same from the downloaded file, without --plugin.
     const d = settingsFile('out-plugin-cli', {});
     const r2 = await run(['setup', '--no-hooks', '--settings', d.f, '--port', String(p.port)]);
-    assert.match(r2.out, /The plugin's relay 1\.5\.0 is running/);
+    assert.match(r2.out, /The plugin's relay 1\.5\.1 is running/);
     assert.doesNotMatch(r2.out, /Start the relay|hooks run this file/);
     assert.match(r2.out, /To undo: {2}node constellation-relay\.mjs setup --remove --no-hooks/);
     // Status says what runs there.
     const st = await run(['status', '--plugin', '--settings', s.f, '--port', String(p.port)]);
     assert.match(st.out, /Telemetry: +on, to the relay/);
     assert.match(st.out, /Hooks that setup added: none/);
-    assert.match(st.out, new RegExp(`Relay on port ${p.port}: the plugin's relay, version 1\\.5\\.0`));
+    assert.match(st.out, new RegExp(`Relay on port ${p.port}: the plugin's relay, version 1\\.5\\.1`));
   } finally { p.stop(); }
 
   // A relay started by hand answers.
@@ -294,12 +294,12 @@ test('setup output: no "Start the relay" when one answers, no hooks line without
   try {
     const s = settingsFile('out-manual', {});
     const r = await run(['setup', '--settings', s.f, '--port', String(m.port)]);
-    assert.match(r.out, /A relay started by hand \(version 1\.5\.0\) is running on port \d+: telemetry goes to it\./);
+    assert.match(r.out, /A relay started by hand \(version 1\.5\.1\) is running on port \d+: telemetry goes to it\./);
     assert.doesNotMatch(r.out, /Start the relay/);
     assert.match(r.out, /16 background hooks/);
     assert.match(r.out, /The hooks run this file from where it is now/);
     const st = await run(['status', '--settings', s.f, '--port', String(m.port)]);
-    assert.match(st.out, new RegExp(`Relay on port ${m.port}: a relay started by hand, version 1\\.5\\.0\n`));
+    assert.match(st.out, new RegExp(`Relay on port ${m.port}: a relay started by hand, version 1\\.5\\.1\n`));
     assert.doesNotMatch(st.out, /pairing|code/i);
     assert.match(st.out, /Hooks that setup added: 16/);
   } finally { m.stop(); }
@@ -478,7 +478,7 @@ test('open: a user-invoked skill that runs only the open script', () => {
 });
 
 test('open: the right opener per platform, through spawn (stubbed: nothing opens)', async () => {
-  const { opener, openUrl, summary, LAB_URL } = await import(OPEN);
+  const { opener, openUrl, summary, LAB_URL } = await import(pathToFileURL(OPEN).href);
   assert.equal(LAB_URL, 'https://diegobianqui.com/lab/constellation?connect=claude-code');
   assert.deepEqual(opener('darwin', LAB_URL), { command: 'open', args: [LAB_URL], options: {} });
   assert.deepEqual(opener('linux', LAB_URL), { command: 'xdg-open', args: [LAB_URL], options: {} });
@@ -526,10 +526,10 @@ test('open: starts the relay when none runs, finds it when it does (browser not 
   const first = await run([], { relay: OPEN, env });
   assert.equal(first.code, 0, first.err);
   assert.equal(first.out.trim().split('\n').length, 1, 'one line');
-  assert.match(first.out, new RegExp(`^Opened http://localhost:3314/lab/constellation\\?connect=claude-code in your browser; started the plugin's relay 1\\.5\\.0 on port ${port}\\.`));
+  assert.match(first.out, new RegExp(`^Opened http://localhost:3314/lab/constellation\\?connect=claude-code in your browser; started the plugin's relay 1\\.5\\.1 on port ${port}\\.`));
   try {
     const again = await run([], { relay: OPEN, env });
-    assert.match(again.out, new RegExp(`the plugin's relay 1\\.5\\.0 is running on port ${port}\\.`));
+    assert.match(again.out, new RegExp(`the plugin's relay 1\\.5\\.1 is running on port ${port}\\.`));
     const h = await health(port);
     assert.equal(h.mode, 'plugin');
   } finally {
@@ -542,7 +542,7 @@ test('open: starts the relay when none runs, finds it when it does (browser not 
 // ------------------------------------------------------------ Windows and Linux (platform injected)
 
 test('hooks on Windows: a --start hook waits long enough to see a refused connection', async () => {
-  const { hookTimes } = await import(RELAY);
+  const { hookTimes } = await import(pathToFileURL(RELAY).href);
   assert.deepEqual(hookTimes('darwin', true), { total: 2000, request: 1500 });
   assert.deepEqual(hookTimes('linux', true), { total: 2000, request: 1500 });
   assert.deepEqual(hookTimes('win32', false), { total: 2000, request: 1500 });
@@ -564,7 +564,7 @@ test('hooks.json: the same command line works in sh, Git Bash and PowerShell', (
 });
 
 test('transcript paths as Claude Code writes them on Windows: read; anything else ignored', async () => {
-  const { transcriptTargets } = await import(RELAY);
+  const { transcriptTargets } = await import(pathToFileURL(RELAY).href);
   const W = path.win32;
   const main = 'C:\\Users\\Ana\\.claude\\projects\\C--Users-Ana-site\\sess-1.jsonl';
   assert.deepEqual(transcriptTargets({ session_id: 'sess-1', transcript_path: main }, W), [{ file: main, session: 'sess-1' }]);
